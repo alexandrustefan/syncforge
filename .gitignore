@@ -1,0 +1,20 @@
+build/
+.build/
+SyncForgeKit/.build/
+SyncForgeKit/.swiftpm/
+*.xcuserstate
+xcuserdata/
+DerivedData/
+.DS_Store
+
+# Local configuration, signing material and exports
+.env
+.env.*
+!.env.example
+*.p12
+*.pfx
+*.pem
+*.key
+*.mobileprovision
+*.dSYM/
+*.xcarchive/

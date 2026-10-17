@@ -1,0 +1,17 @@
+name: Feature request
+description: Suggest an improvement with a concrete use case.
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: Describe your speaker setup and the limitation you encounter.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Include alternatives or tradeoffs you have considered.
+    validations:
+      required: true

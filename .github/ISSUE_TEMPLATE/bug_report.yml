@@ -1,0 +1,33 @@
+name: Bug report
+description: Report a reproducible audio, calibration or app problem.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please redact device UIDs, personal paths and other private information. Do not upload audio recordings or whole state files. Report vulnerabilities through SECURITY.md.
+  - type: textarea
+    id: environment
+    attributes:
+      label: Setup
+      description: macOS version, Mac/CPU architecture, app commit, speaker/mic models, connection types and sample rates. GUI or sfctl?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Include the settings needed to reproduce this consistently.
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: Expected and actual behavior
+      description: Distinguish what you heard, what the app reported, and anything independently measured.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Redacted diagnostics or screenshots
+      description: Small relevant excerpts only. Review them before posting.

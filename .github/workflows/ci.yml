@@ -1,0 +1,46 @@
+name: macOS build and tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: macos-15
+    timeout-minutes: 25
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      SYNCFORGE_SIGN_IDENTITY: "-"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+          brew install xcodegen
+      - name: Check scripts
+        run: bash -n scripts/build.sh scripts/create-signing-identity.sh
+      - name: Release tests and ad-hoc signed app build
+        run: scripts/build.sh --test
+      - name: Thread Sanitizer handoff regressions
+        working-directory: SyncForgeKit
+        run: swift test --scratch-path ../build/tsan --sanitize=thread --filter ConcurrencyTests
+      - name: Keep build diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: build-diagnostics
+          path: build/xcodebuild.log
+          if-no-files-found: ignore
+          retention-days: 7
