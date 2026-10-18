@@ -2,8 +2,8 @@
   <img src="App/SyncForge/Assets.xcassets/AppIcon.appiconset/icon_128x128@2x.png" width="96" alt="SyncForge app icon">
 </p>
 <h1 align="center">SyncForge</h1>
-<p align="center"><strong>Your Mac's audio. All your speakers. Better timing.</strong></p>
-<p align="center">Microphone calibration, independent EQ, and passive Bluetooth drift tracking for macOS.</p>
+<p align="center"><strong>Play Bluetooth and wired speakers together.</strong></p>
+<p align="center">Align their timing with your Mac or iPhone microphone.</p>
 <p align="center">
   <a href="https://github.com/alexandrustefan/syncforge/actions/workflows/ci.yml"><img src="https://github.com/alexandrustefan/syncforge/actions/workflows/ci.yml/badge.svg" alt="macOS build and tests"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a>
@@ -11,9 +11,14 @@
   <img src="https://img.shields.io/badge/Swift_%2B_C11-native-F05138?logo=swift&logoColor=white" alt="Built with Swift and C11">
 </p>
 
-SyncForge plays system audio through several outputs and delays the faster speakers to match the
-slower ones. Connect wired desktop speakers and a Bluetooth speaker, measure their arrival times
-with a microphone, and adjust each output's sound independently.
+SyncForge combines Bluetooth speakers with wired, USB, HDMI or built-in speakers to play your Mac's
+system audio together. Different speakers introduce different delays, especially over Bluetooth.
+SyncForge uses a microphone at your listening position to hear a short test sound from each speaker,
+measure when it arrives, and delay the faster speakers to match the slowest.
+
+**Your Mac's built-in microphone is enough for timing calibration.** You can also use a compatible
+iPhone as a microphone through macOS Continuity Camera and place it where you sit. No separate
+measurement microphone or audio interface is needed. Each speaker keeps its own volume and EQ.
 
 It runs in the menu bar, captures audio through Core Audio process taps, and needs no virtual audio
 driver. Audio processing and microphone analysis stay on your Mac.
@@ -59,7 +64,7 @@ hardware qualification. [Validation record](docs/VALIDATION.md).
 
 </details>
 
-Screenshots show a real setup. Device names, delays and correction estimates are examples, not
+Screenshots show a real setup from an earlier interface revision. Device names, delays and correction estimates are examples, not
 recommended settings or independent proof of acoustic alignment.
 
 ## Build and run

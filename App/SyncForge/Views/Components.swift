@@ -30,15 +30,14 @@ extension OutputState {
         }
     }
 
-    /// Short synchronisation summary, e.g. "Calibrated ±0.2 ms · 3 h ago".
+    /// Calibration state; measurement details belong in the expanded timing controls.
     var syncSummary: String {
         if profile.delayMode == .manual { return "Manual delay" }
         guard let cal = profile.calibration else {
-            return timing?.latencySource == .driverEstimate ? "Driver estimate — not calibrated" : "Not calibrated"
+            return "Not calibrated"
         }
         if cal.needsRecalibration { return "Recalibration recommended" }
-        let age = RelativeDateTimeFormatter().localizedString(for: cal.date, relativeTo: Date())
-        return String(format: "Calibrated ±%.1f ms · ", max(cal.spreadMs / 2, 0.05)) + age
+        return "Calibrated"
     }
 }
 
@@ -53,7 +52,7 @@ struct StatusPill: View {
     var body: some View {
         HStack(spacing: 5) {
             Circle().fill(color).frame(width: 7, height: 7)
-            Text(text).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            Text(text).font(.callout).foregroundStyle(.secondary).lineLimit(1)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 3)
@@ -186,7 +185,7 @@ struct VolumeSlider: View {
                     if editingPercent {
                         TextField("0–100", text: $percentDraft)
                             .textFieldStyle(.roundedBorder)
-                            .font(.caption.monospacedDigit())
+                            .font(.body.monospacedDigit())
                             .multilineTextAlignment(.trailing)
                             .focused($percentFocused)
                             .onSubmit { commitPercent() }
@@ -207,7 +206,7 @@ struct VolumeSlider: View {
                             Text("\(percentLabelText)%").frame(minWidth: 36, alignment: .trailing)
                         }
                         .buttonStyle(.plain)
-                        .font(.caption.monospacedDigit())
+                        .font(.body.monospacedDigit())
                         .foregroundStyle(.secondary)
                         .help("Click to enter an exact volume percentage")
                         .accessibilityLabel("Edit \(accessibilityName) percentage")
@@ -357,9 +356,12 @@ struct SectionHeader: View {
     var subtitle: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(title).font(.title2.weight(.semibold))
-            if let subtitle { Text(subtitle).foregroundStyle(.secondary) }
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title).font(.title.weight(.semibold))
+            if let subtitle {
+                Text(subtitle).font(.body).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }

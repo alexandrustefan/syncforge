@@ -83,21 +83,22 @@ struct OutputsView: View {
         let engine = model.engine
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                SectionHeader(title: "Outputs", subtitle: "One audio source, every selected output in sync, independent processing per device.")
+                SectionHeader(title: "Outputs", subtitle: "Choose speakers for your Mac’s audio, then calibrate their timing.")
                 banners
                 Card {
                     HStack(spacing: 16) {
                         VStack(alignment: .leading, spacing: 6) {
-                            Text("Audio Source").font(.caption).foregroundStyle(.secondary)
+                            Text("Audio source").font(.body).foregroundStyle(.secondary)
                             HStack {
                                 Image(systemName: "macwindow.on.rectangle")
                                 Text("System Audio").font(.headline)
                             }
-                            CaptureLevelMeter().frame(width: 160)
+                            CaptureLevelMeter()
                         }
+                        .frame(width: 160, alignment: .leading)
                         Divider().frame(height: 50)
                         VStack(alignment: .leading, spacing: 6) {
-                            Text("Master Volume").font(.caption).foregroundStyle(.secondary)
+                            Text("Master volume").font(.body).foregroundStyle(.secondary)
                             VolumeSlider(value: engine.settingsBinding(\.masterVolume), muted: engine.settingsBinding(\.masterMuted), accessibilityName: "Master volume")
                                 .disabled(model.calibration.isRunning)
                         }
@@ -105,12 +106,11 @@ struct OutputsView: View {
                         VStack(alignment: .trailing, spacing: 6) {
                             Button {
                                 model.section = .calibration
-                                model.calibrate()
                             } label: {
-                                Label("Calibrate All", systemImage: "waveform.badge.mic")
+                                Label("Calibrate…", systemImage: "waveform.badge.mic")
                             }
                             .buttonStyle(.borderedProminent)
-                            .disabled(!engine.isEnabled || engine.activeOutputUIDs.isEmpty || model.calibration.isRunning)
+                            .disabled(model.calibration.isRunning)
                             Text(String(format: "Base latency %.0f ms", engine.effectiveBaseLatencyMs))
                                 .font(.caption).foregroundStyle(.secondary)
                         }
@@ -167,38 +167,60 @@ struct OutputCard: View {
                     .controlSize(.small)
                     .accessibilityLabel("Enable \(output.name)")
                 Image(systemName: output.transport.symbol).font(.title3).foregroundStyle(.secondary).frame(width: 24)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(output.name).font(.headline)
-                    Text(deviceLine).font(.caption).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(output.name).font(.system(size: 15, weight: .semibold))
+                    Text(deviceLine).font(.callout).foregroundStyle(.secondary)
                 }
                 Spacer()
+                if output.status == .playing {
+                    OutputLevelMeter(uid: uid).frame(width: 80)
+                }
                 StatusPill(text: output.status.label, color: output.statusColor)
             }
 
             if output.profile.enabled {
-                HStack(spacing: 14) {
-                    VolumeSlider(value: engine.profileBinding(uid, \.volume, fallback: 1),
-                                 muted: engine.profileBinding(uid, \.muted, fallback: false), accessibilityName: "\(output.name) volume")
-                        .frame(maxWidth: 340)
-                    Spacer(minLength: 0)
-                    Button(engine.soloOutputUID == uid ? "Unsolo" : "Solo") { engine.toggleSolo(uid) }
-                        .controlSize(.small)
-                        .tint(engine.soloOutputUID == uid ? .accentColor : nil)
-                        .disabled(output.status != .playing || model.calibration.isRunning)
-                        .help("Listen to this output alone without changing other outputs' volume or mute settings")
-                    Button("Edit EQ…") { model.openEqualizer(for: uid) }.controlSize(.small)
+                Divider()
+                Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 12) {
+                    GridRow {
+                        Text("Volume").foregroundStyle(.secondary)
+                        HStack(spacing: 16) {
+                            VolumeSlider(value: engine.profileBinding(uid, \.volume, fallback: 1),
+                                         muted: engine.profileBinding(uid, \.muted, fallback: false),
+                                         accessibilityName: "\(output.name) volume")
+                                .frame(maxWidth: 380)
+                            Spacer(minLength: 0)
+                            Button(engine.soloOutputUID == uid ? "Unsolo" : "Solo") { engine.toggleSolo(uid) }
+                                .tint(engine.soloOutputUID == uid ? .accentColor : nil)
+                                .disabled(output.status != .playing || model.calibration.isRunning)
+                                .help("Listen to this output alone without changing saved volume or mute settings")
+                        }
+                    }
+                    GridRow {
+                        Text("Timing").foregroundStyle(.secondary)
+                        HStack(spacing: 12) {
+                            Text(output.syncSummary)
+                                .foregroundStyle(output.profile.calibration?.needsRecalibration == true ? .orange : .primary)
+                            if output.profile.delayMode == .automatic, output.profile.calibration != nil,
+                               let timing = output.timing {
+                                Text(String(format: "+%.1f ms delay", timing.appliedDelayMs))
+                                    .monospacedDigit().foregroundStyle(.secondary)
+                            }
+                            Spacer(minLength: 0)
+                        }
+                    }
+                    GridRow {
+                        Text("Equalizer").foregroundStyle(.secondary)
+                        HStack(spacing: 12) {
+                            Text(equalizerSummary).lineLimit(2).help(equalizerSummary)
+                            Spacer(minLength: 0)
+                            Button("Edit EQ…") { model.openEqualizer(for: uid) }
+                        }
+                    }
                 }
-                HStack(spacing: 10) {
-                    OutputLevelMeter(uid: uid).frame(width: 140)
-                    Text(engine.soloOutputUID.map { $0 == uid ? "Solo playback" : "Silenced by solo" }
-                         ?? equalizerSummary)
-                        .font(.caption).foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .help(equalizerSummary)
-                    Spacer()
-                    Text(output.syncSummary)
-                        .font(.caption)
-                        .foregroundStyle(output.profile.calibration?.needsRecalibration == true ? .orange : .secondary)
+                .font(.body)
+                if let soloUID = engine.soloOutputUID {
+                    Text(soloUID == uid ? "Solo selected" : "Silenced by solo")
+                        .font(.body).foregroundStyle(.secondary)
                 }
                 DisclosureGroup("Channels, timing & diagnostics") {
                     OutputDetails(output: output)
@@ -221,13 +243,7 @@ struct OutputCard: View {
 
     private var deviceLine: String {
         var parts = [output.transport.displayName]
-        if let d = output.device {
-            parts.append(String(format: "%.1f kHz", d.nominalSampleRate / 1000))
-            parts.append("\(d.outputChannels) ch")
-            if let src = d.dataSourceName, src != d.name { parts.append(src) }
-        } else {
-            parts.append("not connected")
-        }
+        if output.device == nil { parts.append("Not connected") }
         if output.isDefaultOutput { parts.append("macOS default output") }
         return parts.joined(separator: " · ")
     }
@@ -241,6 +257,13 @@ private struct OutputDetails: View {
         let engine = model.engine
         let uid = output.uid
         VStack(alignment: .leading, spacing: 12) {
+            if let device = output.device {
+                Text(String(format: "%.1f kHz · %d channels", device.nominalSampleRate / 1000, device.outputChannels))
+                    .foregroundStyle(.secondary)
+                if let source = device.dataSourceName, source != device.name {
+                    Text(source).foregroundStyle(.secondary)
+                }
+            }
             Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 14, verticalSpacing: 10) {
                 GridRow {
                     Text("Channels").foregroundStyle(.secondary)
@@ -305,7 +328,11 @@ private struct OutputDetails: View {
                 }
                 .font(.callout)
             }
-            Text(output.syncSummary).font(.caption).foregroundStyle(output.profile.calibration?.needsRecalibration == true ? .orange : .secondary)
+            if let calibration = output.profile.calibration {
+                Text("Measured " + RelativeDateTimeFormatter().localizedString(for: calibration.date, relativeTo: Date())
+                     + String(format: " · repeatability ±%.2f ms", calibration.spreadMs / 2))
+                    .font(.callout).foregroundStyle(.secondary)
+            }
             if let reason = output.profile.calibration?.recalibrationReason, output.profile.calibration?.needsRecalibration == true {
                 HStack {
                     Text(reason).font(.caption).foregroundStyle(.secondary)

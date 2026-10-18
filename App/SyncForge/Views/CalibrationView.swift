@@ -4,272 +4,337 @@ import SyncForgeCore
 struct CalibrationView: View {
     @Environment(AppModel.self) private var model
     @State private var selected: Set<String> = []
+    @State private var selectionInitialized = false
     @State private var micPermission = MicrophonePermission.status()
-    @State private var confirmReset = false
-    @State private var progressAnchorDate: Date?
-    @State private var progressAnchorValue = 0.0
 
-    private var engine: SyncEngine { model.engine }
-    private var cal: CalibrationEngine { model.calibration }
-
-    private var playing: [OutputState] { engine.outputs.filter { $0.status == .playing } }
+    private var candidates: [OutputState] {
+        model.engine.outputs.filter { $0.profile.enabled && $0.isConnected }
+            .sorted { ($0.name.localizedLowercase, $0.uid) < ($1.name.localizedLowercase, $1.uid) }
+    }
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                SectionHeader(title: "Calibration",
-                              subtitle: "Measure the real acoustic delay of every output with a microphone, then delay the faster ones so everything arrives together.")
-                steps
-                setup
-                liveSyncCard
-                progressCard
-                if !cal.measurements.isEmpty { results }
-                howItWorks
+            VStack(alignment: .leading, spacing: 20) {
+                SectionHeader(title: "Calibration", subtitle: "Use your Mac or iPhone microphone to align Bluetooth and wired speakers.")
+                if model.calibration.isRunning { CalibrationProgressCard() }
+                CalibrationSetupCard(outputs: candidates, selected: $selected, micPermission: $micPermission)
+                if !model.calibration.isRunning {
+                    if !model.calibration.measurements.isEmpty { CalibrationResultsCard() }
+                    else if model.calibration.phase != .idle { CalibrationProgressCard() }
+                }
+                CalibrationLiveSyncCard()
+                CalibrationHistoryCard()
+                DisclosureGroup("How calibration works") {
+                    Text("Each speaker plays short sweeps while the microphone listens. SyncForge compares repeated measurements and adds delay to the faster outputs. Verification, when enabled, measures the remaining timing difference at the microphone. Room reflections and background noise can affect the result. Audio is analysed in memory and is not saved.")
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 8)
+                }
             }
-            .padding(20)
+            .font(.body)
+            .controlSize(.regular)
+            .frame(maxWidth: 820, alignment: .leading)
+            .padding(28)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .onAppear {
             micPermission = MicrophonePermission.status()
-            if selected.isEmpty { selected = Set(playing.map(\.uid)) }
-            if cal.isRunning { beginProgressEstimate() }
+            if !selectionInitialized {
+                selected = Set(candidates.map(\.uid))
+                selectionInitialized = true
+            }
         }
+        .onChange(of: candidates.map(\.uid)) { _, uids in
+            selected.formIntersection(uids)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            micPermission = MicrophonePermission.status()
+        }
+    }
+}
+
+private struct CalibrationSetupCard: View {
+    @Environment(AppModel.self) private var model
+    let outputs: [OutputState]
+    @Binding var selected: Set<String>
+    @Binding var micPermission: MicrophonePermission.Status
+
+    private var engine: SyncEngine { model.engine }
+    private var mic: AudioDeviceInfo? { engine.devices.inputDevice(uid: model.microphoneUID ?? "") }
+    private var microphones: [AudioDeviceInfo] { engine.devices.inputDevices.filter { $0.transport != .virtual } }
+    private var canStart: Bool {
+        engine.isEnabled && !model.calibration.isRunning && mic != nil && mic?.transport.isBluetooth != true
+            && micPermission != .denied && !selected.isEmpty
+            && selected.allSatisfy { uid in outputs.contains { $0.uid == uid && $0.status == .playing } }
+    }
+
+    var body: some View {
+        Card {
+            VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Microphone").font(.headline)
+                    Picker("Microphone", selection: Binding(get: { mic?.uid ?? "" }, set: { model.setMicrophone($0) })) {
+                        if mic == nil { Text("Choose a microphone").tag("") }
+                        ForEach(microphones) { device in
+                            Text(device.name + (device.transport.isBluetooth ? " (Bluetooth)" : "")).tag(device.uid)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(maxWidth: 420, alignment: .leading)
+                    Text("Place the microphone where you listen and keep the room quiet.")
+                        .foregroundStyle(.secondary)
+                    if mic?.transport.isBluetooth == true {
+                        Label("Use a built-in, USB or Continuity microphone. Bluetooth microphones change the speaker's audio mode and latency.", systemImage: "exclamationmark.triangle")
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if micPermission == .denied {
+                        HStack(spacing: 12) {
+                            Label("Microphone access is off.", systemImage: "mic.slash")
+                            Button("Open Privacy Settings") { NSWorkspace.shared.open(MicrophonePermission.settingsURL) }
+                        }
+                    } else if micPermission == .notDetermined {
+                        Text("macOS will ask for microphone access when you start.").foregroundStyle(.secondary)
+                    }
+                }
+                Divider()
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Text("Speakers").font(.headline)
+                        Spacer()
+                        Button("Choose Outputs…") { model.section = .outputs }
+                    }
+                    if outputs.isEmpty {
+                        Text("Enable the speakers you want to calibrate in Outputs.").foregroundStyle(.secondary)
+                    } else {
+                        ForEach(outputs) { output in
+                            Toggle(isOn: Binding(get: { selected.contains(output.uid) }, set: { on in
+                                if on { selected.insert(output.uid) } else { selected.remove(output.uid) }
+                            })) {
+                                HStack {
+                                    Label(output.name, systemImage: output.transport.symbol)
+                                    Spacer()
+                                    if engine.isEnabled && output.status != .playing {
+                                        Text(output.status.label).foregroundStyle(.secondary)
+                                    }
+                                }
+                            }
+                            .toggleStyle(.checkbox)
+                        }
+                    }
+                }
+                Divider()
+                CalibrationAdvancedOptions()
+            }
+            .disabled(model.calibration.isRunning)
+            Divider().padding(.vertical, 4)
+            VStack(alignment: .leading, spacing: 12) {
+                Text(readiness).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                if !model.calibration.isRunning {
+                    HStack(spacing: 12) {
+                        Button("Start Calibration") {
+                            micPermission = MicrophonePermission.status()
+                            guard canStart else { return }
+                            model.calibrate(outputs: outputs.filter { selected.contains($0.uid) }.map(\.uid))
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!canStart)
+                        if !engine.isEnabled {
+                            Button("Turn On SyncForge") { engine.setEnabled(true) }
+                                .disabled(selected.isEmpty)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private var readiness: String {
+        if model.calibration.isRunning { return "Keep the microphone in place until calibration finishes." }
+        if selected.isEmpty { return "Select at least one speaker to continue." }
+        if !engine.isEnabled { return "Turn on SyncForge, then start calibration when you are ready." }
+        if mic == nil { return "Choose a microphone to continue." }
+        if micPermission == .denied { return "Allow microphone access in System Settings to continue." }
+        if mic?.transport.isBluetooth == true { return "Choose a microphone that does not use Bluetooth to continue." }
+        if !selected.allSatisfy({ uid in outputs.contains { $0.uid == uid && $0.status == .playing } }) {
+            return "Wait for the selected speakers to start, or check their status in Outputs."
+        }
+        return "Ready. Music pauses while the selected speakers play short test sweeps."
+    }
+}
+
+private struct CalibrationAdvancedOptions: View {
+    @Environment(AppModel.self) private var model
+    @State private var isEditing = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(summary).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            DisclosureGroup("Calibration options") {
+                VStack(alignment: .leading, spacing: 16) {
+                    Toggle("Adjust speaker tone and room bass (auto-EQ)", isOn: model.engine.settingsBinding(\.autoEQAfterCalibration))
+                    Toggle("Match speaker levels at the microphone", isOn: model.engine.settingsBinding(\.matchLevelsAfterCalibration))
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("Test level")
+                            Spacer()
+                            Text(String(format: "%.0f dBFS", model.settings.calibrationLevelDb)).monospacedDigit().foregroundStyle(.secondary)
+                        }
+                        Slider(value: model.engine.settingsBinding(\.calibrationLevelDb), in: -36 ... -6, onEditingChanged: editingChanged)
+                            .accessibilityLabel("Calibration test level")
+                        Text("The test may repeat louder if a speaker is hard to hear.").foregroundStyle(.secondary)
+                    }
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("Latency search range")
+                            Spacer()
+                            Text(String(format: "Up to %.0f ms", model.settings.calibrationMaxLatencyMs)).monospacedDigit().foregroundStyle(.secondary)
+                        }
+                        Slider(value: model.engine.settingsBinding(\.calibrationMaxLatencyMs), in: 500...4000, step: 100, onEditingChanged: editingChanged)
+                            .accessibilityLabel("Calibration latency search range")
+                    }
+                }
+                .padding(.top, 12)
+            }
+        }
+        .onDisappear { editingChanged(false) }
+    }
+
+    private var summary: String {
+        let tone = model.settings.autoEQAfterCalibration ? "Tone correction on" : "Tone correction off"
+        let level = model.settings.matchLevelsAfterCalibration ? "Level matching on" : "Level matching off"
+        return tone + " · " + level
+    }
+
+    private func editingChanged(_ editing: Bool) {
+        guard editing != isEditing else { return }
+        isEditing = editing
+        if editing { model.engine.beginUndoableChange(named: "Change Calibration Options") }
+        else { model.engine.endUndoableChange() }
+    }
+}
+
+private struct CalibrationLiveSyncCard: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        Card {
+            HStack(alignment: .top, spacing: 16) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Live Sync").font(.headline)
+                    Text("Optional monitoring for Bluetooth timing changes. Uses the microphone while music plays.")
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+                Toggle("Live Sync", isOn: model.liveSyncBinding).toggleStyle(.switch).labelsHidden()
+                    .disabled(model.calibration.isRunning)
+            }
+            HStack(spacing: 8) {
+                Text(model.settings.liveSyncEnabled ? model.liveSyncStatus : "Off").foregroundStyle(.secondary)
+                if model.liveSync.micInUse { Label("Microphone in use", systemImage: "mic.fill").foregroundStyle(.secondary) }
+            }
+            if model.settings.liveSyncAfterCalibration {
+                Text("Set to turn on after calibration when wired and wireless outputs are available.")
+                    .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            DisclosureGroup("Requirements & options") {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Needs a calibration with the selected microphone, a wired output and one wireless output, with music playing. Live Sync keeps the microphone open and analyses audio in memory.")
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Toggle("Turn on after calibration", isOn: model.engine.settingsBinding(\.liveSyncAfterCalibration))
+                        .disabled(model.calibration.isRunning)
+                }
+                .padding(.top, 10)
+            }
+        }
+    }
+}
+
+private struct CalibrationHistoryCard: View {
+    @Environment(AppModel.self) private var model
+    @State private var confirmReset = false
+
+    var body: some View {
+        Card {
+            DisclosureGroup("Calibration history") {
+                VStack(alignment: .leading, spacing: 14) {
+                    if model.previousCalibrationRestored {
+                        Text("Previous calibration restored.").foregroundStyle(.secondary)
+                    }
+                    if model.canRestorePreviousCalibration {
+                        Text("Return to the timing, tone and level settings from before the last calibration change.")
+                            .foregroundStyle(.secondary)
+                        Button("Restore Previous Calibration") { model.restorePreviousCalibration() }
+                    }
+                    Text("Reset removes measured timing, calibration corrections and level trims. Your volumes, EQ presets and selected outputs are kept.")
+                        .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    Button("Reset Calibration…") { confirmReset = true }
+                        .disabled(model.calibration.isRunning)
+                }
+                .padding(.top, 12)
+            }
+        }
+        .confirmationDialog("Reset calibration?", isPresented: $confirmReset) {
+            Button("Reset Calibration", role: .destructive) { model.startOver() }
+        } message: {
+            Text("Measured timing, tone corrections, room correction and level trims will be cleared. Volumes, EQ presets and selected outputs are kept.")
+        }
+    }
+}
+
+private struct CalibrationProgressCard: View {
+    @Environment(AppModel.self) private var model
+    @State private var progressAnchorDate: Date?
+    @State private var progressAnchorValue = 0.0
+
+    private var cal: CalibrationEngine { model.calibration }
+
+    var body: some View {
+        Card {
+            HStack(alignment: .firstTextBaseline) {
+                Text(cal.isRunning ? "Calibration in progress" : phaseText).font(.headline)
+                Spacer()
+                if cal.isRunning { Button("Cancel Calibration", role: .cancel) { model.cancelCalibration() } }
+            }
+            if cal.isRunning {
+                Text(phaseText).foregroundStyle(.secondary)
+                ProgressView(value: cal.progress)
+                HStack {
+                    if let index = cal.currentSpeakerIndex, cal.speakerCount > 0 {
+                        Text("Speaker \(index) of \(cal.speakerCount)")
+                    } else if cal.speakerCount > 0 {
+                        Text("\(cal.speakerCount) speaker\(cal.speakerCount == 1 ? "" : "s")")
+                    }
+                    Spacer()
+                    TimelineView(.periodic(from: .now, by: 1)) { context in
+                        Text(remainingTimeText(at: context.date))
+                    }
+                }
+                .foregroundStyle(.secondary)
+            }
+            if cal.micInUse {
+                HStack(spacing: 12) {
+                    Label("Microphone in use", systemImage: "mic.fill").foregroundStyle(.secondary)
+                    LevelMeter(db: cal.micLevelDb).frame(width: 140)
+                }
+            }
+            if !cal.log.isEmpty {
+                DisclosureGroup("Measurement log") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(Array(cal.log.enumerated()), id: \.offset) { _, line in
+                            Text(line).font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 10)
+                }
+            }
+        }
+        .onAppear { if cal.isRunning { beginProgressEstimate() } }
         .onChange(of: cal.isRunning) { _, running in
             if running { beginProgressEstimate() }
             else { progressAnchorDate = nil }
-        }
-        .onChange(of: playing.map(\.uid)) { _, uids in selected.formIntersection(uids); if selected.isEmpty { selected = Set(uids) } }
-    }
-
-    // MARK: Setup
-
-    private var micBinding: Binding<String> {
-        Binding(get: { model.microphoneUID ?? "" }, set: { model.setMicrophone($0) })
-    }
-
-    private var selectedMic: AudioDeviceInfo? { engine.devices.inputDevice(uid: micBinding.wrappedValue) }
-
-    private var setup: some View {
-        Card {
-            Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 14, verticalSpacing: 12) {
-                GridRow {
-                    Text("Microphone").foregroundStyle(.secondary)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Picker("", selection: micBinding) {
-                            ForEach(engine.devices.inputDevices.filter { $0.transport != .virtual }) { d in
-                                Text(d.name + (d.transport.isBluetooth ? " — Bluetooth (not recommended)" : "")).tag(d.uid)
-                            }
-                        }
-                        .labelsHidden()
-                        .frame(maxWidth: 360)
-                        if let mic = selectedMic {
-                            if mic.transport.isBluetooth {
-                                Text("Bluetooth microphones switch audio to the hands-free profile, which changes the speaker's codec and latency. Use the built-in or a USB microphone.")
-                                    .font(.caption).foregroundStyle(.red)
-                            } else if mic.transport == .continuity {
-                                Text("Good choice for accuracy: put the iPhone exactly where your head is (screen up, not in a pocket). Its wireless delay is the same for every speaker and is cancelled by interleaved measurement.")
-                                    .font(.caption).foregroundStyle(.secondary)
-                            } else if mic.transport == .builtIn {
-                                Text("Tip: an iPhone (Continuity Camera microphone) can be placed exactly at your listening position.")
-                                    .font(.caption).foregroundStyle(.secondary)
-                            }
-                        }
-                        if micPermission == .denied {
-                            HStack {
-                                Text("Microphone access is denied.").font(.caption).foregroundStyle(.red)
-                                Button("Open Privacy Settings") { NSWorkspace.shared.open(MicrophonePermission.settingsURL) }.controlSize(.small)
-                            }
-                        } else if micPermission == .notDetermined {
-                            Text("macOS will ask for microphone access when calibration or Live Sync starts. Audio is analysed in memory; nothing is recorded to disk or sent anywhere.")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                    }
-                }
-                GridRow {
-                    Text("Outputs").foregroundStyle(.secondary)
-                    VStack(alignment: .leading, spacing: 4) {
-                        if playing.isEmpty {
-                            Text("Turn SyncForge on and enable the outputs you want to align.").foregroundStyle(.secondary)
-                        }
-                        ForEach(playing) { o in
-                            Toggle(isOn: Binding(get: { selected.contains(o.uid) },
-                                                 set: { if $0 { selected.insert(o.uid) } else { selected.remove(o.uid) } })) {
-                                Label(o.name, systemImage: o.transport.symbol)
-                            }
-                        }
-                    }
-                }
-                GridRow {
-                    Text("Test level").foregroundStyle(.secondary)
-                    HStack {
-                        Slider(value: engine.settingsBinding(\.calibrationLevelDb), in: -36 ... -6).frame(width: 200)
-                        Text(String(format: "%.0f dBFS", engine.store.settings.calibrationLevelDb)).monospacedDigit()
-                        Text("Raised automatically if a speaker is not heard.").font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-                GridRow {
-                    Text("Levels").foregroundStyle(.secondary)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Toggle("Correct tone automatically (auto-EQ)", isOn: engine.settingsBinding(\.autoEQAfterCalibration))
-                        Text("Matches the speakers' tone to each other and cuts room bass resonances, with gentle corrections you can switch off in Equalizer. Treble above ~5 kHz can't be judged with the MacBook mic; an iPhone covers more.")
-                            .font(.caption).foregroundStyle(.secondary)
-                        Toggle("Match speaker levels at the microphone", isOn: engine.settingsBinding(\.matchLevelsAfterCalibration))
-                        Text("Makes every speaker equally loud at your seat: quieter ones get up to +6 dB (the limiter prevents clipping), louder ones are turned down.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-                GridRow {
-                    Text("Search range").foregroundStyle(.secondary)
-                    HStack {
-                        Slider(value: engine.settingsBinding(\.calibrationMaxLatencyMs), in: 500...4000, step: 100).frame(width: 200)
-                        Text(String(format: "up to %.0f ms", engine.store.settings.calibrationMaxLatencyMs)).monospacedDigit()
-                    }
-                }
-            }
-            .disabled(cal.isRunning)
-            Divider()
-            HStack {
-                Text("Place the microphone at your listening position and keep the room quiet. Each speaker plays a few short sweeps in turn.")
-                    .font(.callout).foregroundStyle(.secondary)
-                Spacer()
-                if cal.isRunning {
-                    Button("Cancel", role: .cancel) { model.cancelCalibration() }
-                } else {
-                    Button {
-                        micPermission = MicrophonePermission.status()
-                        model.calibrate(outputs: Array(selected))
-                    } label: {
-                        Label("Start Calibration", systemImage: "waveform.badge.mic")
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(selected.isEmpty || !engine.isEnabled || selectedMic == nil || selectedMic?.transport.isBluetooth == true)
-                }
-            }
-        }
-    }
-
-    // MARK: Steps
-
-    private var steps: some View {
-        let mic = selectedMic
-        let wireless = playing.first { $0.transport.isWireless }
-        let cal = (wireless ?? playing.first)?.profile.calibration
-        let calibratedWithThisMic = cal != nil && cal?.microphoneUID == mic?.uid
-        return Card {
-            HStack(alignment: .top, spacing: 18) {
-                step(1, "Microphone", mic.map { "\($0.name) — place it where you sit" } ?? "Choose one below", done: mic != nil)
-                step(2, "Calibrate", cal.map { "Done " + RelativeDateTimeFormatter().localizedString(for: $0.date, relativeTo: Date())
-                    + (calibratedWithThisMic ? "" : " (with another mic)") } ?? "Not yet", done: calibratedWithThisMic)
-                step(3, "Live Sync", model.settings.liveSyncEnabled ? model.liveSyncStatus : "Off — turns on after calibrating",
-                     done: model.liveSync.state == .monitoring)
-                Spacer(minLength: 0)
-                Button("Start Over…") { confirmReset = true }
-                    .disabled(model.calibration.isRunning)
-                    .help("Forget all measurements, delays, corrections and level trims")
-            }
-            if model.canRestorePreviousCalibration {
-                Divider()
-                HStack {
-                    Text("Return to the calibration settings from before the last change.")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Spacer()
-                    Button("Restore Previous Calibration") { model.restorePreviousCalibration() }
-                        .help("Restore timing, speaker corrections, level trims and room correction")
-                }
-            } else if model.previousCalibrationRestored {
-                Text("Previous calibration restored.").font(.caption).foregroundStyle(.secondary)
-            }
-        }
-        .confirmationDialog("Start over?", isPresented: $confirmReset) {
-            Button("Forget All Calibrations", role: .destructive) { model.startOver() }
-        } message: {
-            Text("All measured latencies, compensation, tone corrections, room corrections and level trims are cleared. Volumes, EQ presets and selected outputs are kept.")
-        }
-    }
-
-    private func step(_ n: Int, _ title: String, _ detail: String, done: Bool) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            ZStack {
-                Circle().fill(done ? Color.green : Color.secondary.opacity(0.25)).frame(width: 22, height: 22)
-                if done { Image(systemName: "checkmark").font(.caption.bold()).foregroundStyle(.white) }
-                else { Text("\(n)").font(.caption.bold()) }
-            }
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.subheadline.weight(.semibold))
-                Text(detail).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .frame(maxWidth: 230, alignment: .leading)
-    }
-
-    // MARK: Live Sync
-
-    private var liveSyncCard: some View {
-        Card {
-            HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 6) {
-                        Text("Live Sync").font(.headline)
-                        if model.liveSync.micInUse { Label("Microphone in use", systemImage: "mic.fill").font(.caption).foregroundStyle(.orange) }
-                    }
-                    Text("Bluetooth speakers change their own delay over time (yours moved by up to 170 ms within minutes). Live Sync listens to the music with the calibration microphone every few seconds and follows those changes. No test sounds, no muting.")
-                        .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    Text("Needs: one calibration with this microphone, at least one wired output and one wireless output, music playing. The microphone stays open while it runs; audio is analysed in memory and never stored.")
-                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    Toggle("Turn on automatically after calibrating", isOn: engine.settingsBinding(\.liveSyncAfterCalibration))
-                        .font(.callout)
-                        .disabled(cal.isRunning)
-                    if model.settings.liveSyncEnabled {
-                        Text("Listening with: \(selectedMic?.name ?? "—") (the calibration microphone)").font(.caption).foregroundStyle(.secondary)
-                        Text("Status: \(model.liveSyncStatus)\(model.liveSync.corrections > 0 ? " · \(model.liveSync.corrections) correction(s) this session" : "")")
-                            .font(.callout)
-                    }
-                }
-                Spacer()
-                Toggle("", isOn: model.liveSyncBinding).toggleStyle(.switch).labelsHidden()
-                    .disabled(cal.isRunning)
-            }
-        }
-    }
-
-    // MARK: Progress
-
-    @ViewBuilder private var progressCard: some View {
-        if cal.phase != .idle {
-            Card {
-                HStack(spacing: 12) {
-                    if cal.micInUse {
-                        Label("Microphone in use", systemImage: "mic.fill").foregroundStyle(.orange)
-                        LevelMeter(db: cal.micLevelDb).frame(width: 120)
-                    }
-                    Text(phaseText).font(.callout)
-                    Spacer()
-                }
-                if cal.isRunning {
-                    ProgressView(value: cal.progress)
-                    HStack {
-                        if let index = cal.currentSpeakerIndex, cal.speakerCount > 0 {
-                            Text("Speaker \(index) of \(cal.speakerCount)")
-                        } else if cal.speakerCount > 0 {
-                            Text("\(cal.speakerCount) speaker\(cal.speakerCount == 1 ? "" : "s") in this calibration")
-                        }
-                        Spacer()
-                        TimelineView(.periodic(from: .now, by: 1)) { context in
-                            Text(remainingTimeText(at: context.date))
-                        }
-                    }
-                    .font(.caption).foregroundStyle(.secondary)
-                }
-                if !cal.log.isEmpty {
-                    DisclosureGroup("Details") {
-                        VStack(alignment: .leading, spacing: 2) {
-                            ForEach(Array(cal.log.enumerated()), id: \.offset) { _, line in
-                                Text(line).font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
-                            }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                }
-            }
         }
     }
 
@@ -286,9 +351,7 @@ struct CalibrationView: View {
         let seconds = elapsed / completed * max(0, 1 - cal.progress)
         guard seconds.isFinite else { return "Time varies with retries" }
         let rounded = max(10, Int((seconds / 10).rounded(.up)) * 10)
-        if rounded >= 60 {
-            return "About \(Int(ceil(Double(rounded) / 60))) min left · varies with retries"
-        }
+        if rounded >= 60 { return "About \(Int(ceil(Double(rounded) / 60))) min left · varies with retries" }
         return "About \(rounded) sec left · varies with retries"
     }
 
@@ -297,121 +360,132 @@ struct CalibrationView: View {
         case .idle: return ""
         case .preparing: return "Preparing…"
         case .listening: return "Measuring background noise…"
-        case .measuring(let n): return "Measuring \(n)…"
+        case .measuring(let name): return "Measuring \(name)…"
         case .applying: return "Applying compensation…"
-        case .verifying(let n): return "Verifying \(n) with compensation applied…"
-        case .finished: return "Calibration complete."
-        case .failed(let m): return m
-        case .cancelled: return "Calibration cancelled."
+        case .verifying(let name): return "Verifying \(name)…"
+        case .finished: return "Calibration complete"
+        case .failed(let message): return message
+        case .cancelled: return "Calibration cancelled"
         }
     }
+}
 
-    // MARK: Results
+private struct CalibrationResultsCard: View {
+    @Environment(AppModel.self) private var model
+    private var cal: CalibrationEngine { model.calibration }
 
-    private var results: some View {
+    var body: some View {
         Card {
-            HStack {
-                Text("Results").font(.headline)
-                Spacer()
+            Text(cal.phase == .finished ? "Calibration results" : "Calibration incomplete").font(.headline)
+            Text(summary).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if case .failed(let message) = cal.phase {
+                Label(message, systemImage: "exclamationmark.triangle")
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if cal.phase == .cancelled {
+                Text("Calibration was cancelled.").foregroundStyle(.secondary)
             }
-            Text(resultSummary).font(.callout).foregroundStyle(.secondary)
-            ScrollView(.horizontal) {
-                Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 8) {
-                    GridRow {
-                        Text("Device").bold()
-                        Text("Measured arrival").bold()
-                        Text("Compensation").bold()
-                        Text("Repeatability").bold()
-                        Text("Level").bold()
-                        Text("Tone").bold()
-                        Text("Signal confidence").bold()
+            if let verification = cal.verification {
+                HStack(alignment: .top, spacing: 28) {
+                    if verification.arrivalMs.count >= 2 {
+                        if verification.arrivalMs.count == cal.measurements.filter({ $0.latencyMs != nil }).count,
+                           let before = cal.lastReport?.differenceBeforeMs {
+                            CalibrationResultValue(title: "Before", value: formatMs(before))
+                        }
+                        CalibrationResultValue(title: "Remaining difference", value: formatMs(verification.remainingDifferenceMs, decimals: 2))
                     }
-                    .font(.caption)
+                    CalibrationResultValue(title: "Repeatability", value: formatMs(verification.repeatabilityMs, decimals: 2))
+                }
+                .padding(.vertical, 8)
+                Text(verification.arrivalMs.count >= 2
+                     ? "Measured at the microphone position during verification."
+                     : "One speaker verified. A timing comparison needs at least two speakers.")
                     .foregroundStyle(.secondary)
-                    ForEach(cal.measurements) { m in
-                        GridRow {
-                            Text(m.name)
-                            if let l = m.latencyMs {
-                                Text(formatMs(l)).monospacedDigit()
-                                Text(m.compensationMs.map { "+" + formatMs($0) } ?? "—").monospacedDigit()
-                                Text(String(format: "±%.2f ms (%d/%d)", m.spreadMs / 2, m.accepted, m.samplesMs.count)).monospacedDigit()
-                                Text(m.relativeLevelDb.map { String(format: "%+.1f dB", $0) } ?? "—").monospacedDigit()
-                                    .help("Loudness at the microphone relative to the loudest output (same input level)")
-                                Text(m.correction.isEmpty ? "—" : "\(m.correction.count) band\(m.correction.count == 1 ? "" : "s")")
-                                    .help(m.correction.map { String(format: "%@ %.0f Hz %+.1f dB", $0.type.displayName, $0.frequency, $0.gainDb) }.joined(separator: "\n"))
-                                confidence(m.confidence)
-                            } else {
-                                Text(m.failure ?? "Failed").foregroundStyle(.red).gridCellColumns(6)
-                            }
-                        }
-                    }
+            }
+            DisclosureGroup("Speaker measurements") {
+                CalibrationMeasurementTable(measurements: cal.measurements)
+                    .padding(.top, 12)
+                if let room = cal.lastReport?.roomCorrection, !room.isEmpty {
+                    Text("Room correction: " + room.map { String(format: "%.0f Hz %+.1f dB", $0.frequency, $0.gainDb) }.joined(separator: ", "))
+                        .foregroundStyle(.secondary).padding(.top, 8)
                 }
             }
-            if let room = cal.lastReport?.roomCorrection, !room.isEmpty {
-                Text("Room resonances cut in the system EQ: " + room.map { String(format: "%.0f Hz %+.1f dB", $0.frequency, $0.gainDb) }.joined(separator: ", "))
-                    .font(.callout)
-            }
-            if let v = cal.verification {
-                Divider()
-                HStack(spacing: 24) {
-                    if let before = cal.lastReport?.differenceBeforeMs {
-                        VStack(alignment: .leading) {
-                            Text("Before").font(.caption).foregroundStyle(.secondary)
-                            Text(formatMs(before)).font(.title3.monospacedDigit())
+            if !cal.log.isEmpty {
+                DisclosureGroup("Measurement log") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(Array(cal.log.enumerated()), id: \.offset) { _, line in
+                            Text(line).font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
                         }
                     }
-                    VStack(alignment: .leading) {
-                        Text("Estimated remaining difference").font(.caption).foregroundStyle(.secondary)
-                        Text(String(format: "%.2f ms", v.remainingDifferenceMs)).font(.title3.monospacedDigit())
-                            .foregroundStyle(v.remainingDifferenceMs <= 2 ? .green : v.remainingDifferenceMs <= 5 ? .orange : .red)
-                    }
-                    VStack(alignment: .leading) {
-                        Text("Measurement repeatability").font(.caption).foregroundStyle(.secondary)
-                        Text(String(format: "%.2f ms", v.repeatabilityMs)).font(.title3.monospacedDigit())
-                    }
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 10)
                 }
-                Text("Verification re-measures every output with the new compensation in place, using the same microphone. It reflects the timing at the microphone position.")
-                    .font(.caption).foregroundStyle(.secondary)
             }
         }
     }
 
-    private var resultSummary: String {
-        if model.previousCalibrationRestored {
-            return "Previous calibration restored. Results below are from the latest measurement."
-        }
+    private var summary: String {
+        if model.previousCalibrationRestored { return "Previous calibration restored. These results describe the latest measurement." }
         let measured = cal.measurements.filter { $0.latencyMs != nil }.count
         let total = cal.measurements.count
-        if cal.isRunning { return "Measured \(measured) of \(total) speakers so far. Results are still being collected." }
-        if cal.phase == .finished {
-            if measured == total {
-                return cal.verification == nil
-                    ? "Measured \(measured) of \(total) speakers. Timing was not verified in a second pass."
-                    : "Measured \(measured) of \(total) speakers. Verification below shows the remaining timing difference at the microphone."
-            }
-            return "Measured \(measured) of \(total) speakers. Review the failed measurements below before relying on this calibration."
+        if cal.phase != .finished { return "Calibration did not finish. \(measured) of \(total) speakers were measured. Check the measurement log before using these results." }
+        if measured != total { return "Measured \(measured) of \(total) speakers. Open speaker measurements to review the outputs that could not be measured." }
+        guard let verification = cal.verification else {
+            return "Measured \(measured) of \(total) speakers. A second verification pass was not completed."
         }
-        return "Calibration did not finish. Measured \(measured) of \(total) speakers; review the details before using these results."
+        if verification.arrivalMs.count < 2 {
+            return "Measured \(measured) of \(total) speakers. One speaker was verified."
+        }
+        return "Measured \(measured) of \(total) speakers. Verification compared \(verification.arrivalMs.count) speakers."
     }
+}
 
-    private func confidence(_ c: MeasurementConfidence) -> some View {
-        let color: Color = c == .high ? .green : c == .medium ? .yellow : c == .low ? .orange : .red
-        return StatusPill(text: c.rawValue.capitalized, color: color)
+private struct CalibrationResultValue: View {
+    let title: String
+    let value: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title).foregroundStyle(.secondary)
+            Text(value).font(.title3.monospacedDigit())
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
+}
 
-    private var howItWorks: some View {
-        DisclosureGroup("How calibration works") {
-            Text("""
-            SyncForge first finds each output with one sweep, then plays sweeps on all outputs in turn (interleaved), timed so that they arrive at the microphone evenly spaced. Each output is measured relative to a reference output at the same moment, which cancels slow changes in the microphone's own delay (important for wireless microphones such as an iPhone). The sweep goes through the same delay line, resampler and EQ as your music. The microphone recording is matched against the sweep with a phase-transform cross-correlation, which is robust to room noise and to differences between speakers; the earliest strong arrival is used so desk and wall reflections are ignored. Several repetitions are combined with outlier rejection, and the spread between them is shown as repeatability.
+private struct CalibrationMeasurementTable: View {
+    let measurements: [DeviceMeasurement]
 
-            Both the scheduled playback time and the microphone samples are measured on the Mac's host clock, so the result is the real acoustic delay of each output (including Bluetooth buffering), not what its driver reports. The slowest output gets no extra delay; every other output waits for it.
-
-            Recordings stay in memory only during calibration and are discarded afterwards.
-            """)
-            .font(.callout)
-            .foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
-            .padding(.top, 4)
+    var body: some View {
+        ScrollView(.horizontal) {
+            Grid(alignment: .leading, horizontalSpacing: 20, verticalSpacing: 12) {
+                GridRow {
+                    Text("Speaker")
+                    Text("Arrival")
+                    Text("Compensation")
+                    Text("Repeatability")
+                    Text("Level")
+                    Text("Tone")
+                    Text("Signal confidence")
+                }
+                .foregroundStyle(.secondary)
+                ForEach(measurements) { measurement in
+                    GridRow {
+                        Text(measurement.name)
+                        if let latency = measurement.latencyMs {
+                            Text(formatMs(latency)).monospacedDigit()
+                            Text(measurement.compensationMs.map { "+" + formatMs($0) } ?? "—").monospacedDigit()
+                            Text(String(format: "±%.2f ms (%d/%d)", measurement.spreadMs / 2, measurement.accepted, measurement.samplesMs.count)).monospacedDigit()
+                            Text(measurement.relativeLevelDb.map { String(format: "%+.1f dB", $0) } ?? "—").monospacedDigit()
+                                .help("Loudness at the microphone relative to the loudest output, using the same test level")
+                            Text(measurement.correction.isEmpty ? "—" : "\(measurement.correction.count) band\(measurement.correction.count == 1 ? "" : "s")")
+                                .help(measurement.correction.map { String(format: "%@ %.0f Hz %+.1f dB", $0.type.displayName, $0.frequency, $0.gainDb) }.joined(separator: "\n"))
+                            Text(measurement.confidence.rawValue.capitalized)
+                        } else {
+                            Text(measurement.failure ?? "Could not measure").gridCellColumns(6)
+                        }
+                    }
+                }
+            }
+            .textSelection(.enabled)
         }
     }
 }

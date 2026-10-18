@@ -4,21 +4,23 @@
 1. **Pick outputs.** Click the menu bar icon (two speakers), tick your outputs and switch SyncForge **on**.
    While it's on, macOS audio plays only through the outputs you selected. Switch it off or quit, and macOS
    plays normally again.
-2. **Calibrate.** Open *Calibration* and follow the three steps:
-   1. **Microphone:** choose one and put it where you sit. The MacBook mic is fine; an **iPhone** (Continuity)
-      can sit exactly at your head position.
-   2. **Calibrate:** *Start Calibration*. Each speaker plays a few soft sweeps (about 30–40 s in total;
-      music is muted meanwhile). Delays, tone correction and (optionally) level matching are applied
-      automatically.
-   3. **Live Sync** can turn on automatically after a successful calibration. It monitors candidate
-      wireless latency changes while music plays; reflections and weak signals can remain ambiguous.
+2. **Calibrate.** Open *Calibration* or click *Calibrate…* in Outputs. Choose your Mac's built-in
+   microphone or a compatible iPhone microphone through Continuity Camera, and place it where you sit.
+   Select the speakers you want to align, keep the room quiet, and click *Start Calibration*.
+   Each speaker plays short test sweeps; music is muted during measurement.
 
-   Progress shows the speaker being measured and an approximate remaining time once enough sweeps
-   have completed. Retries and verification can change that estimate.
+   *Calibration options* contains tone correction, optional level matching, test level and search
+   range. Progress shows the speaker being measured and an approximate remaining time once enough
+   sweeps have completed. Retries and verification can change that estimate.
 
-   *Restore Previous Calibration* returns to the timing, correction and level trims from before the
-   latest calibration change in this app session. It also remains available if verification failed
-   after applying measurements. *Start Over…* clears measurements and derived adjustments; it can be undone.
+   **Live Sync** is optional. With a calibrated wired and wireless pair, it can monitor changes in
+   wireless delay while music plays. It keeps the microphone open; audio is processed locally in
+   memory. Reflections and weak signals can remain ambiguous.
+
+   *Calibration history* contains *Restore Previous Calibration*, which returns to the timing,
+   correction and level trims from before the latest calibration change in this app session. It also
+   remains available if verification failed after applying measurements. Resetting calibration clears
+   measurements and derived adjustments; it can be undone.
 3. **Fine-tune by ear (optional).** *Sync Test* plays one click on every output. Nudge *Fine trim*
    (±1 / ±0.1 ms) until you hear a single sharp click.
 4. **Equalize.** *Equalizer → All Outputs (System EQ)* shapes the overall sound; pick a speaker to adjust it

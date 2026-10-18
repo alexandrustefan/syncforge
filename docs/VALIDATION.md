@@ -129,6 +129,19 @@ limits. Electrical response tests do not establish a subjective or acoustic impr
   accuracy, reconnect behavior or acoustic alignment. No audio capture or calibration was started
   during the UI checks.
 
+### Calibration and output hierarchy (2026-10-18)
+
+- The release suite executed 73 tests, with one opt-in benchmark skipped and zero failures.
+  The revised app built with ad-hoc signing and passed signature verification.
+- Native checks used an isolated, in-memory preview with the engine off, at 980 px and 830 px
+  window widths. Outputs, calibration setup, advanced options and history were inspected;
+  speaker selection, navigation and calibration-option undo were exercised.
+- Code review checked start readiness, unavailable microphones, failure/cancellation messages,
+  restoration controls and single-speaker verification. A single verified speaker no longer
+  displays a remaining inter-speaker difference of zero.
+- Calibration progress and result states were reviewed in source, not exercised with a microphone.
+  No new acoustic or Live Sync accuracy claim follows from these UI checks. The build was not installed.
+
 ## Issues found on hardware and fixed
 
 1. PHAT weighting gave noise-only bins (above the mic's ~5–6 kHz cut-off) full weight. Result: 17 dB
