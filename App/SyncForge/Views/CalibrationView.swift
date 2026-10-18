@@ -6,6 +6,8 @@ struct CalibrationView: View {
     @State private var selected: Set<String> = []
     @State private var micPermission = MicrophonePermission.status()
     @State private var confirmReset = false
+    @State private var progressAnchorDate: Date?
+    @State private var progressAnchorValue = 0.0
 
     private var engine: SyncEngine { model.engine }
     private var cal: CalibrationEngine { model.calibration }
@@ -29,6 +31,11 @@ struct CalibrationView: View {
         .onAppear {
             micPermission = MicrophonePermission.status()
             if selected.isEmpty { selected = Set(playing.map(\.uid)) }
+            if cal.isRunning { beginProgressEstimate() }
+        }
+        .onChange(of: cal.isRunning) { _, running in
+            if running { beginProgressEstimate() }
+            else { progressAnchorDate = nil }
         }
         .onChange(of: playing.map(\.uid)) { _, uids in selected.formIntersection(uids); if selected.isEmpty { selected = Set(uids) } }
     }
@@ -118,6 +125,7 @@ struct CalibrationView: View {
                     }
                 }
             }
+            .disabled(cal.isRunning)
             Divider()
             HStack {
                 Text("Place the microphone at your listening position and keep the room quiet. Each speaker plays a few short sweeps in turn.")
@@ -155,7 +163,20 @@ struct CalibrationView: View {
                      done: model.liveSync.state == .monitoring)
                 Spacer(minLength: 0)
                 Button("Start Over…") { confirmReset = true }
+                    .disabled(model.calibration.isRunning)
                     .help("Forget all measurements, delays, corrections and level trims")
+            }
+            if model.canRestorePreviousCalibration {
+                Divider()
+                HStack {
+                    Text("Return to the calibration settings from before the last change.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Restore Previous Calibration") { model.restorePreviousCalibration() }
+                        .help("Restore timing, speaker corrections, level trims and room correction")
+                }
+            } else if model.previousCalibrationRestored {
+                Text("Previous calibration restored.").font(.caption).foregroundStyle(.secondary)
             }
         }
         .confirmationDialog("Start over?", isPresented: $confirmReset) {
@@ -196,6 +217,7 @@ struct CalibrationView: View {
                         .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     Toggle("Turn on automatically after calibrating", isOn: engine.settingsBinding(\.liveSyncAfterCalibration))
                         .font(.callout)
+                        .disabled(cal.isRunning)
                     if model.settings.liveSyncEnabled {
                         Text("Listening with: \(selectedMic?.name ?? "—") (the calibration microphone)").font(.caption).foregroundStyle(.secondary)
                         Text("Status: \(model.liveSyncStatus)\(model.liveSync.corrections > 0 ? " · \(model.liveSync.corrections) correction(s) this session" : "")")
@@ -204,6 +226,7 @@ struct CalibrationView: View {
                 }
                 Spacer()
                 Toggle("", isOn: model.liveSyncBinding).toggleStyle(.switch).labelsHidden()
+                    .disabled(cal.isRunning)
             }
         }
     }
@@ -221,7 +244,21 @@ struct CalibrationView: View {
                     Text(phaseText).font(.callout)
                     Spacer()
                 }
-                if cal.isRunning { ProgressView(value: cal.progress) }
+                if cal.isRunning {
+                    ProgressView(value: cal.progress)
+                    HStack {
+                        if let index = cal.currentSpeakerIndex, cal.speakerCount > 0 {
+                            Text("Speaker \(index) of \(cal.speakerCount)")
+                        } else if cal.speakerCount > 0 {
+                            Text("\(cal.speakerCount) speaker\(cal.speakerCount == 1 ? "" : "s") in this calibration")
+                        }
+                        Spacer()
+                        TimelineView(.periodic(from: .now, by: 1)) { context in
+                            Text(remainingTimeText(at: context.date))
+                        }
+                    }
+                    .font(.caption).foregroundStyle(.secondary)
+                }
                 if !cal.log.isEmpty {
                     DisclosureGroup("Details") {
                         VStack(alignment: .leading, spacing: 2) {
@@ -236,6 +273,25 @@ struct CalibrationView: View {
         }
     }
 
+    private func beginProgressEstimate() {
+        progressAnchorDate = Date()
+        progressAnchorValue = cal.progress
+    }
+
+    private func remainingTimeText(at date: Date) -> String {
+        guard let started = progressAnchorDate else { return "Estimating time…" }
+        let elapsed = date.timeIntervalSince(started)
+        let completed = cal.progress - progressAnchorValue
+        guard elapsed >= 10, completed >= 0.15 else { return "Estimating time…" }
+        let seconds = elapsed / completed * max(0, 1 - cal.progress)
+        guard seconds.isFinite else { return "Time varies with retries" }
+        let rounded = max(10, Int((seconds / 10).rounded(.up)) * 10)
+        if rounded >= 60 {
+            return "About \(Int(ceil(Double(rounded) / 60))) min left · varies with retries"
+        }
+        return "About \(rounded) sec left · varies with retries"
+    }
+
     private var phaseText: String {
         switch cal.phase {
         case .idle: return ""
@@ -246,7 +302,7 @@ struct CalibrationView: View {
         case .verifying(let n): return "Verifying \(n) with compensation applied…"
         case .finished: return "Calibration complete."
         case .failed(let m): return m
-        case .cancelled: return "Calibration cancelled. Previous settings were kept."
+        case .cancelled: return "Calibration cancelled."
         }
     }
 
@@ -254,33 +310,39 @@ struct CalibrationView: View {
 
     private var results: some View {
         Card {
-            Text("Results").font(.headline)
-            Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 8) {
-                GridRow {
-                    Text("Device").bold()
-                    Text("Measured arrival").bold()
-                    Text("Compensation").bold()
-                    Text("Repeatability").bold()
-                    Text("Level").bold()
-                    Text("Tone").bold()
-                    Text("Confidence").bold()
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                ForEach(cal.measurements) { m in
+            HStack {
+                Text("Results").font(.headline)
+                Spacer()
+            }
+            Text(resultSummary).font(.callout).foregroundStyle(.secondary)
+            ScrollView(.horizontal) {
+                Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 8) {
                     GridRow {
-                        Text(m.name)
-                        if let l = m.latencyMs {
-                            Text(formatMs(l)).monospacedDigit()
-                            Text(m.compensationMs.map { "+" + formatMs($0) } ?? "—").monospacedDigit()
-                            Text(String(format: "±%.2f ms (%d/%d)", m.spreadMs / 2, m.accepted, m.samplesMs.count)).monospacedDigit()
-                            Text(m.relativeLevelDb.map { String(format: "%+.1f dB", $0) } ?? "—").monospacedDigit()
-                                .help("Loudness at the microphone relative to the loudest output (same input level)")
-                            Text(m.correction.isEmpty ? "—" : "\(m.correction.count) band\(m.correction.count == 1 ? "" : "s")")
-                                .help(m.correction.map { String(format: "%@ %.0f Hz %+.1f dB", $0.type.displayName, $0.frequency, $0.gainDb) }.joined(separator: "\n"))
-                            confidence(m.confidence)
-                        } else {
-                            Text(m.failure ?? "Failed").foregroundStyle(.red).gridCellColumns(6)
+                        Text("Device").bold()
+                        Text("Measured arrival").bold()
+                        Text("Compensation").bold()
+                        Text("Repeatability").bold()
+                        Text("Level").bold()
+                        Text("Tone").bold()
+                        Text("Signal confidence").bold()
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    ForEach(cal.measurements) { m in
+                        GridRow {
+                            Text(m.name)
+                            if let l = m.latencyMs {
+                                Text(formatMs(l)).monospacedDigit()
+                                Text(m.compensationMs.map { "+" + formatMs($0) } ?? "—").monospacedDigit()
+                                Text(String(format: "±%.2f ms (%d/%d)", m.spreadMs / 2, m.accepted, m.samplesMs.count)).monospacedDigit()
+                                Text(m.relativeLevelDb.map { String(format: "%+.1f dB", $0) } ?? "—").monospacedDigit()
+                                    .help("Loudness at the microphone relative to the loudest output (same input level)")
+                                Text(m.correction.isEmpty ? "—" : "\(m.correction.count) band\(m.correction.count == 1 ? "" : "s")")
+                                    .help(m.correction.map { String(format: "%@ %.0f Hz %+.1f dB", $0.type.displayName, $0.frequency, $0.gainDb) }.joined(separator: "\n"))
+                                confidence(m.confidence)
+                            } else {
+                                Text(m.failure ?? "Failed").foregroundStyle(.red).gridCellColumns(6)
+                            }
                         }
                     }
                 }
@@ -312,6 +374,24 @@ struct CalibrationView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
+    }
+
+    private var resultSummary: String {
+        if model.previousCalibrationRestored {
+            return "Previous calibration restored. Results below are from the latest measurement."
+        }
+        let measured = cal.measurements.filter { $0.latencyMs != nil }.count
+        let total = cal.measurements.count
+        if cal.isRunning { return "Measured \(measured) of \(total) speakers so far. Results are still being collected." }
+        if cal.phase == .finished {
+            if measured == total {
+                return cal.verification == nil
+                    ? "Measured \(measured) of \(total) speakers. Timing was not verified in a second pass."
+                    : "Measured \(measured) of \(total) speakers. Verification below shows the remaining timing difference at the microphone."
+            }
+            return "Measured \(measured) of \(total) speakers. Review the failed measurements below before relying on this calibration."
+        }
+        return "Calibration did not finish. Measured \(measured) of \(total) speakers; review the details before using these results."
     }
 
     private func confidence(_ c: MeasurementConfidence) -> some View {
@@ -404,6 +484,7 @@ struct SyncTestView: View {
                 }
             }
             .padding(20)
+            .disabled(model.calibration.isRunning)
         }
         .onDisappear { if engine.syncClicksActive { engine.stopSyncClicks() } }
     }

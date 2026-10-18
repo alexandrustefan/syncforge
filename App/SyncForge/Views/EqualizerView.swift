@@ -14,11 +14,12 @@ struct EqualizerView: View {
     @State private var showSavePreset = false
     @State private var presetName = ""
     @State private var selectedBand: UUID?
+    @State private var isEditingEQ = false
 
     private var engine: SyncEngine { model.engine }
 
     private var candidates: [OutputState] {
-        engine.outputs.sorted { ($0.profile.enabled ? 0 : 1, $0.name) < ($1.profile.enabled ? 0 : 1, $1.name) }
+        engine.outputs.sorted { ($0.profile.enabled ? 0 : 1, $0.name.localizedLowercase, $0.uid) < ($1.profile.enabled ? 0 : 1, $1.name.localizedLowercase, $1.uid) }
     }
 
     private var target: EQTarget {
@@ -41,19 +42,28 @@ struct EqualizerView: View {
         }
     }
 
-    private func updateDSP(_ t: EQTarget, markCustom: Bool = true, _ mutate: @escaping (inout DSPSettings) -> Void) {
-        switch t {
-        case .system:
-            engine.updateSettings { s in
-                mutate(&s.systemDSP)
-                if markCustom { s.systemDSP.presetName = "Custom" }
-            }
-        case .output(let uid):
-            engine.updateProfile(uid) { p in
-                mutate(&p.dsp)
-                if markCustom { p.dsp.presetName = "Custom" }
+    private func updateDSP(_ t: EQTarget, markCustom: Bool = true, named actionName: String = "Edit Equalizer", _ mutate: @escaping (inout DSPSettings) -> Void) {
+        engine.performUndoableChange(named: actionName) {
+            switch t {
+            case .system:
+                engine.updateSettings { s in
+                    mutate(&s.systemDSP)
+                    if markCustom { s.systemDSP.presetName = "Custom" }
+                }
+            case .output(let uid):
+                engine.updateProfile(uid) { p in
+                    mutate(&p.dsp)
+                    if markCustom { p.dsp.presetName = "Custom" }
+                }
             }
         }
+    }
+
+    private func eqEditingChanged(_ editing: Bool) {
+        guard editing != isEditingEQ else { return }
+        isEditingEQ = editing
+        if editing { engine.beginUndoableChange(named: "Edit Equalizer") }
+        else { engine.endUndoableChange() }
     }
 
     private func dspBinding<T>(_ kp: WritableKeyPath<DSPSettings, T>, markCustom: Bool = true) -> Binding<T> {
@@ -70,12 +80,14 @@ struct EqualizerView: View {
             VStack(alignment: .leading, spacing: 16) {
                 SectionHeader(title: "Equalizer",
                               subtitle: "The system EQ shapes the sound of every output. Each output also has its own EQ, filters and limiter on top, for correcting that speaker.")
-                toolbar
-                editor
+                toolbar.disabled(model.calibration.isRunning)
+                editor.disabled(model.calibration.isRunning)
             }
             .padding(20)
         }
         .sheet(isPresented: $showSavePreset) { savePresetSheet }
+        .onDisappear { eqEditingChanged(false) }
+        .onChange(of: model.equalizerUID) { _, _ in eqEditingChanged(false) }
     }
 
     private var savePresetSheet: some View {
@@ -90,8 +102,10 @@ struct EqualizerView: View {
                     if !name.isEmpty {
                         var d = dsp(target)
                         d.presetName = name
-                        engine.store.saveCustomPreset(name: name, settings: d)
-                        updateDSP(target, markCustom: false) { $0.presetName = name }
+                        engine.performUndoableChange(named: "Save EQ Preset") {
+                            engine.store.saveCustomPreset(name: name, settings: d)
+                            updateDSP(target, markCustom: false) { $0.presetName = name }
+                        }
                     }
                     showSavePreset = false
                 }
@@ -119,11 +133,14 @@ struct EqualizerView: View {
                 .frame(maxWidth: 320)
                 Toggle("Enabled", isOn: dspBinding(\.enabled, markCustom: false))
                     .toggleStyle(.switch)
+                    .fixedSize()
                 Spacer()
+            }
+            HStack(spacing: 12) {
                 Menu {
                     ForEach(engine.store.allPresets) { preset in
                         Button(preset.name + (preset.isBuiltIn ? "" : " (custom)")) {
-                            updateDSP(target, markCustom: false) { d in
+                            updateDSP(target, markCustom: false, named: "Apply EQ Preset") { d in
                                 var s = preset.settings
                                 s.enabled = true
                                 // The system EQ has no limiter of its own; keep the output's limiter settings.
@@ -138,7 +155,11 @@ struct EqualizerView: View {
                         Divider()
                         Menu("Delete Custom Preset") {
                             ForEach(engine.store.customPresets) { preset in
-                                Button(preset.name) { engine.store.customPresets.removeAll { $0.name == preset.name } }
+                                Button(preset.name) {
+                                    engine.performUndoableChange(named: "Delete EQ Preset") {
+                                        engine.store.customPresets.removeAll { $0.name == preset.name }
+                                    }
+                                }
                             }
                         }
                     }
@@ -150,7 +171,7 @@ struct EqualizerView: View {
                     presetName = current.presetName == "Custom" ? "" : current.presetName
                     showSavePreset = true
                 }
-                Button("Reset") { updateDSP(target, markCustom: false) { $0 = .flat } }
+                Button("Reset") { updateDSP(target, markCustom: false, named: "Reset Equalizer") { $0 = .flat } }
                     .help("Neutral: all bands at 0 dB, filters off")
             }
             if let summary = engine.store.allPresets.first(where: { $0.name == current.presetName })?.summary {
@@ -189,7 +210,7 @@ struct EqualizerView: View {
         }()
         Card {
             ResponseGraph(settings: d, sampleRate: rate, effective: combined, measured: targetOutput?.profile.calibration?.responseDb,
-                          selected: $selectedBand) { id, freq, gain in
+                          selected: $selectedBand, onEditingChanged: eqEditingChanged) { id, freq, gain in
                 updateDSP(target) { s in
                     guard let i = s.bands.firstIndex(where: { $0.id == id }) else { return }
                     s.bands[i].frequency = freq
@@ -222,7 +243,7 @@ struct EqualizerView: View {
                 GridRow {
                     Text("Preamp").foregroundStyle(.secondary)
                     HStack {
-                        Slider(value: dspBinding(\.preampDb, markCustom: false), in: -24...12).frame(width: 220)
+                        Slider(value: dspBinding(\.preampDb, markCustom: false), in: -24...12, onEditingChanged: eqEditingChanged).frame(width: 220)
                         Text(String(format: "%+.1f dB", d.preampDb)).monospacedDigit().frame(width: 64, alignment: .trailing)
                         Toggle("Automatic headroom", isOn: dspBinding(\.autoHeadroom, markCustom: false))
                             .help("Lower the preamp by the largest EQ boost so boosts cannot clip")
@@ -235,7 +256,7 @@ struct EqualizerView: View {
                         Text("Limiter").foregroundStyle(.secondary)
                         HStack {
                             Toggle("Prevent clipping", isOn: dspBinding(\.limiterEnabled, markCustom: false))
-                            Slider(value: dspBinding(\.limiterCeilingDb, markCustom: false), in: -12...0)
+                            Slider(value: dspBinding(\.limiterCeilingDb, markCustom: false), in: -12...0, onEditingChanged: eqEditingChanged)
                                 .frame(width: 160)
                                 .disabled(!d.limiterEnabled)
                             Text(String(format: "ceiling %.1f dBFS", d.limiterCeilingDb)).font(.caption).monospacedDigit()
@@ -261,13 +282,17 @@ struct EqualizerView: View {
                 Spacer()
                 if !bands.isEmpty {
                     Toggle("Enabled", isOn: Binding(get: { enabled }, set: { on in
-                        if let o = targetOutput { engine.updateProfile(o.uid) { $0.correctionEnabled = on } }
-                        else { engine.updateSettings { $0.roomCorrectionEnabled = on } }
+                        engine.performUndoableChange(named: "Change Calibration Correction") {
+                            if let o = targetOutput { engine.updateProfile(o.uid) { $0.correctionEnabled = on } }
+                            else { engine.updateSettings { $0.roomCorrectionEnabled = on } }
+                        }
                     }))
                     .toggleStyle(.switch)
                     Button("Clear") {
-                        if let o = targetOutput { engine.updateProfile(o.uid) { $0.correction = [] } }
-                        else { engine.updateSettings { $0.roomCorrection = [] } }
+                        engine.performUndoableChange(named: "Clear Calibration Correction") {
+                            if let o = targetOutput { engine.updateProfile(o.uid) { $0.correction = [] } }
+                            else { engine.updateSettings { $0.roomCorrection = [] } }
+                        }
                     }
                     .controlSize(.small)
                 }
@@ -299,7 +324,7 @@ struct EqualizerView: View {
                 Slider(value: Binding(
                     get: { log10(f.frequency) },
                     set: { v in updateDSP(t) { $0[keyPath: kp].frequency = pow(10, v).rounded() } }),
-                       in: log10(range.lowerBound)...log10(range.upperBound))
+                       in: log10(range.lowerBound)...log10(range.upperBound), onEditingChanged: eqEditingChanged)
                     .frame(width: 220)
                     .disabled(!f.enabled)
                 Text(frequencyLabel(f.frequency)).monospacedDigit().frame(width: 64, alignment: .trailing)
@@ -323,7 +348,7 @@ struct EqualizerView: View {
                         get: { band.gainDb },
                         set: { v in updateDSP(t) { s in
                             if let i = s.bands.firstIndex(where: { $0.id == band.id }) { s.bands[i].gainDb = v }
-                        } }), range: -18...18)
+                        } }), range: -18...18, onEditingChanged: eqEditingChanged)
                         .frame(height: 140)
                         .opacity(band.enabled && band.type.usesGain ? 1 : 0.35)
                     Text(frequencyLabel(band.frequency)).font(.caption2).foregroundStyle(selectedBand == band.id ? Color.accentColor : .secondary)
@@ -414,6 +439,7 @@ struct ResponseGraph: View {
     /// Optional measured response on AutoEQ.grid (dB, normalised), drawn grey.
     var measured: [Double?]? = nil
     @Binding var selected: UUID?
+    var onEditingChanged: (Bool) -> Void = { _ in }
     let onDrag: (UUID, Double, Double) -> Void
 
     private let minF = 20.0, maxF = 20000.0, range = 18.0
@@ -434,11 +460,12 @@ struct ResponseGraph: View {
                         .frame(width: 12, height: 12)
                         .position(x: x(band.frequency, size.width), y: y(gain, size.height))
                         .gesture(DragGesture(minimumDistance: 1).onChanged { g in
+                            onEditingChanged(true)
                             selected = band.id
                             let f = frequency(atX: g.location.x, size.width)
                             let db = max(-range, min(range, ((size.height / 2 - g.location.y) / (size.height / 2)) * range))
                             onDrag(band.id, f.rounded(), (db * 2).rounded() / 2)
-                        })
+                        }.onEnded { _ in onEditingChanged(false) })
                         .help("\(band.type.displayName) \(frequencyLabel(band.frequency)) Hz \(String(format: "%+.1f dB", band.gainDb)) Q \(String(format: "%.2f", band.q))")
                 }
             }

@@ -198,13 +198,17 @@ public struct SavedSetup: Codable, Hashable, Identifiable, Sendable {
     public var created: Date
     public var masterVolume: Double
     public var profiles: [DeviceProfile]
+    /// Sound and timing settings at save time. Nil in setups saved by earlier versions.
+    /// Applying a setup copies playback fields only; app lifecycle and privacy choices stay current.
+    public var settings: AppSettings?
 
-    public init(id: UUID = UUID(), name: String, created: Date = Date(), masterVolume: Double, profiles: [DeviceProfile]) {
+    public init(id: UUID = UUID(), name: String, created: Date = Date(), masterVolume: Double, profiles: [DeviceProfile], settings: AppSettings? = nil) {
         self.id = id
         self.name = name
         self.created = created
         self.masterVolume = masterVolume
         self.profiles = profiles
+        self.settings = settings
     }
 }
 
@@ -215,9 +219,10 @@ public struct PersistedState: Codable, Sendable {
     public var profiles: [String: DeviceProfile] = [:]
     public var setups: [SavedSetup] = []
     public var customPresets: [EQPreset] = []
+    public var selectedSetupID: UUID?
     public init() {}
 
-    enum CodingKeys: String, CodingKey { case version, settings, profiles, setups, customPresets }
+    enum CodingKeys: String, CodingKey { case version, settings, profiles, setups, customPresets, selectedSetupID }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -226,5 +231,91 @@ public struct PersistedState: Codable, Sendable {
         profiles = try c.decodeIfPresent([String: DeviceProfile].self, forKey: .profiles) ?? [:]
         setups = (try? c.decodeIfPresent([SavedSetup].self, forKey: .setups)) ?? []
         customPresets = (try? c.decodeIfPresent([EQPreset].self, forKey: .customPresets)) ?? []
+        selectedSetupID = try c.decodeIfPresent(UUID.self, forKey: .selectedSetupID)
+    }
+}
+
+// Setup recall deliberately excludes engine/Live Sync lifecycle, microphone selection, device
+// visibility, login and calibration-workflow preferences. These belong to the current app session.
+extension AppSettings {
+    mutating func restorePlaybackSettings(from saved: AppSettings) {
+        masterVolume = saved.masterVolume
+        masterMuted = saved.masterMuted
+        linkSystemVolume = saved.linkSystemVolume
+        baseLatencyMs = saved.baseLatencyMs
+        autoBaseLatency = saved.autoBaseLatency
+        maxDelayMs = saved.maxDelayMs
+        reconnectFadeInSeconds = saved.reconnectFadeInSeconds
+        systemDSP = saved.systemDSP
+        roomCorrection = saved.roomCorrection
+        roomCorrectionEnabled = saved.roomCorrectionEnabled
+    }
+
+    var playbackSettings: AppSettings {
+        var result = AppSettings()
+        result.restorePlaybackSettings(from: self)
+        return result
+    }
+}
+
+extension AppSettings {
+    static func restoringChanges(target: Self, baseline: Self, current: Self) -> Self {
+        var result = current
+        func restore<Value: Equatable>(_ keyPath: WritableKeyPath<Self, Value>) {
+            if target[keyPath: keyPath] != baseline[keyPath: keyPath] {
+                result[keyPath: keyPath] = target[keyPath: keyPath]
+            }
+        }
+        restore(\.masterVolume)
+        restore(\.masterMuted)
+        restore(\.linkSystemVolume)
+        restore(\.baseLatencyMs)
+        restore(\.autoBaseLatency)
+        restore(\.maxDelayMs)
+        restore(\.showVirtualDevices)
+        restore(\.showAggregateDevices)
+        restore(\.calibrationLevelDb)
+        restore(\.calibrationMaxLatencyMs)
+        restore(\.calibrationRepetitions)
+        restore(\.verifyAfterCalibration)
+        restore(\.matchLevelsAfterCalibration)
+        restore(\.autoRecalibrateOnReconnect)
+        restore(\.reconnectFadeInSeconds)
+        restore(\.systemDSP)
+        restore(\.roomCorrection)
+        restore(\.roomCorrectionEnabled)
+        restore(\.autoEQAfterCalibration)
+        restore(\.liveSyncAfterCalibration)
+        return result
+    }
+}
+
+extension DeviceProfile {
+    static func restoringChanges(target: Self, baseline: Self, current: Self) -> Self {
+        var result = current
+        func restore<Value: Equatable>(_ keyPath: WritableKeyPath<Self, Value>) {
+            if target[keyPath: keyPath] != baseline[keyPath: keyPath] {
+                result[keyPath: keyPath] = target[keyPath: keyPath]
+            }
+        }
+        restore(\.uid)
+        restore(\.name)
+        restore(\.transport)
+        restore(\.enabled)
+        restore(\.volume)
+        restore(\.muted)
+        restore(\.channelMode)
+        restore(\.leftChannel)
+        restore(\.rightChannel)
+        restore(\.delayMode)
+        restore(\.manualDelayMs)
+        restore(\.trimMs)
+        restore(\.calibration)
+        restore(\.dsp)
+        restore(\.useSystemEQ)
+        restore(\.levelTrimDb)
+        restore(\.correction)
+        restore(\.correctionEnabled)
+        return result
     }
 }

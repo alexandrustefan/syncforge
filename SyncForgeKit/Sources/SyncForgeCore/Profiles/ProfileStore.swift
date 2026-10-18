@@ -9,6 +9,7 @@ public final class ProfileStore {
     public var settings: AppSettings { didSet { scheduleSave() } }
     public private(set) var profiles: [String: DeviceProfile] { didSet { scheduleSave() } }
     public var setups: [SavedSetup] { didSet { scheduleSave() } }
+    public var selectedSetupID: UUID? { didSet { scheduleSave() } }
     public var customPresets: [EQPreset] { didSet { scheduleSave() } }
     public private(set) var loadError: String?
 
@@ -37,6 +38,7 @@ public final class ProfileStore {
         profiles = state.profiles
         setups = state.setups
         customPresets = state.customPresets
+        selectedSetupID = state.selectedSetupID
         loadError = error
     }
 
@@ -95,6 +97,7 @@ public final class ProfileStore {
         state.profiles = profiles
         state.setups = setups
         state.customPresets = customPresets
+        state.selectedSetupID = selectedSetupID
         do {
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             try JSONEncoder.syncForge.encode(state).write(to: url, options: .atomic)

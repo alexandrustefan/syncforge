@@ -80,8 +80,30 @@ public final class SyncEngine {
     public private(set) var captureStatus: CaptureStatus = .stopped
     public private(set) var captureLevelDb: Float = -120
     public private(set) var events: [EngineEvent] = []
-    public private(set) var programMuted = false
-    public private(set) var syncClicksActive = false
+    public private(set) var programMuted = false {
+        didSet { if oldValue != programMuted { programRoutingRevision &+= 1 } }
+    }
+    public private(set) var syncClicksActive = false {
+        didSet { if oldValue != syncClicksActive { programRoutingRevision &+= 1 } }
+    }
+    /// Temporary program-audio audition. Stored enabled/mute settings remain untouched.
+    public private(set) var soloOutputUID: String? {
+        didSet { if oldValue != soloOutputUID { programRoutingRevision &+= 1 } }
+    }
+    /// Invalidates in-flight acoustic observations even if solo/test playback is restored before
+    /// their analysis finishes.
+    @ObservationIgnored private(set) var programRoutingRevision: UInt64 = 0
+    /// Undo is opt-in: automatic timing and device updates never create history entries.
+    @ObservationIgnored public let undoManager = UndoManager()
+    public private(set) var canUndo = false
+    public private(set) var canRedo = false
+    public private(set) var undoActionName = ""
+    public private(set) var redoActionName = ""
+    @ObservationIgnored private var undoObservers: [NSObjectProtocol] = []
+    @ObservationIgnored private var pendingEditName: String?
+    @ObservationIgnored private var editDepth = 0
+    @ObservationIgnored private var userChangeDepth = 0
+    @ObservationIgnored private var editGroupOpen = false
     /// Extra base latency added automatically after underruns.
     public private(set) var autoBaseExtraMs: Double = 0
     public private(set) var systemAudioPermission: SystemAudioPermission.Status = .unknown
@@ -143,6 +165,8 @@ public final class SyncEngine {
         connected = Set(devices.outputDevices.filter(\.isAlive).map(\.uid))
         for d in devices.outputDevices { store.register(d) }
         systemAudioPermission = SystemAudioPermission.status()
+        undoManager.groupsByEvent = false
+        observeUndoHistory()
         observeWorkspace()
         rebuildOutputs()
         if store.settings.engineEnabled { reconcile() }
@@ -156,6 +180,7 @@ public final class SyncEngine {
     public func setEnabled(_ on: Bool) {
         guard on != store.settings.engineEnabled else { return }
         store.settings.engineEnabled = on
+        if !on { soloOutputUID = nil }
         log(on ? "Engine started" : "Engine stopped — normal macOS audio restored")
         reconcile()
     }
@@ -164,6 +189,7 @@ public final class SyncEngine {
         let before = store.profile(uid: uid)
         store.update(uid, mutate)
         let after = store.profile(uid: uid)
+        validateSoloOutput()
         if before?.enabled != after?.enabled || before?.leftChannel != after?.leftChannel || before?.rightChannel != after?.rightChannel {
             reconcile()
         } else {
@@ -216,22 +242,80 @@ public final class SyncEngine {
         rebuildOutputs()
     }
 
-    public func saveSetup(named name: String) {
-        let profiles = store.profiles.values.sorted { $0.name < $1.name }
-        store.setups.append(SavedSetup(name: name, masterVolume: store.settings.masterVolume, profiles: profiles))
+    public var selectedSetupID: UUID? { store.selectedSetupID }
+    public var selectedSetup: SavedSetup? { store.setups.first { $0.id == selectedSetupID } }
+    public var isSelectedSetupModified: Bool {
+        guard let setup = selectedSetup else { return false }
+        let saved = Dictionary(uniqueKeysWithValues: setup.profiles.map { ($0.uid, $0) })
+        // Newly discovered, unused devices do not make a saved mix look edited.
+        let current = store.profiles.filter { saved[$0.key] != nil || $0.value.enabled }
+        guard current == saved, store.settings.masterVolume == setup.masterVolume else { return true }
+        return setup.settings.map { $0.playbackSettings != store.settings.playbackSettings } ?? false
+    }
+
+    @discardableResult
+    public func saveSetup(named name: String) -> SavedSetup {
+        let setup = SavedSetup(name: name, masterVolume: store.settings.masterVolume,
+                               profiles: store.profiles.values.sorted { $0.uid < $1.uid }, settings: store.settings.playbackSettings)
+        store.setups.append(setup)
+        store.selectedSetupID = setup.id
         log("Saved setup “\(name)”")
+        return setup
+    }
+
+    /// Updates the selected snapshot in place, preserving its identity, name and creation date.
+    @discardableResult
+    public func updateSetup(_ id: UUID) -> Bool {
+        guard let index = store.setups.firstIndex(where: { $0.id == id }) else { return false }
+        store.setups[index].profiles = store.profiles.values.sorted { $0.uid < $1.uid }
+        store.setups[index].masterVolume = store.settings.masterVolume
+        store.setups[index].settings = store.settings.playbackSettings
+        store.selectedSetupID = id
+        log("Updated setup “\(store.setups[index].name)”")
+        return true
+    }
+
+    public func removeSetup(_ id: UUID) {
+        store.setups.removeAll { $0.id == id }
+        if selectedSetupID == id { store.selectedSetupID = nil }
     }
 
     public func applySetup(_ setup: SavedSetup) {
+        soloOutputUID = nil
         for uid in store.profiles.keys { store.update(uid) { $0.enabled = false } }
         for p in setup.profiles { store.replace(p) }
-        store.settings.masterVolume = setup.masterVolume
+        store.selectedSetupID = setup.id
+        updateSettings {
+            if let saved = setup.settings { $0.restorePlaybackSettings(from: saved) }
+            $0.masterVolume = setup.masterVolume
+        }
         log("Restored setup “\(setup.name)”")
         reconcile()
     }
 
+    public func toggleSolo(_ uid: String) { setSoloOutput(soloOutputUID == uid ? nil : uid) }
+
+    public func setSoloOutput(_ uid: String?) {
+        if let uid {
+            guard isEnabled, store.profile(uid: uid)?.enabled == true,
+                  devices.outputDevice(uid: uid)?.isAlive == true,
+                  renderers[uid]?.isRunning == true else { return }
+        }
+        guard soloOutputUID != uid else { return }
+        soloOutputUID = uid
+        applyAllParams()
+    }
+
+    private func validateSoloOutput() {
+        guard let uid = soloOutputUID else { return }
+        if !isEnabled || store.profile(uid: uid)?.enabled != true || devices.outputDevice(uid: uid)?.isAlive != true {
+            soloOutputUID = nil
+        }
+    }
+
     /// Stops all audio activity; normal macOS playback resumes. Call on app termination.
     public func shutdown() {
+        soloOutputUID = nil
         teardownAudio()
         store.saveNow()
     }
@@ -380,6 +464,7 @@ public final class SyncEngine {
         reconcileWork?.cancel()
         reconcileWork = nil
         for d in devices.outputDevices { store.register(d) }
+        validateSoloOutput()
 
         let wanted: [AudioDeviceInfo] = (isEnabled && !suspended)
             ? store.profiles.values.filter(\.enabled).compactMap { p in devices.outputDevice(uid: p.uid).flatMap { $0.isAlive ? $0 : nil } }
@@ -434,12 +519,14 @@ public final class SyncEngine {
         }
         guard !renderers.isEmpty else {
             // A tap mutes normal playback. Never retain it when every selected output failed.
+            soloOutputUID = nil
             teardownAudio()
             captureStatus = .failed("No selected output could start. Normal macOS audio has been restored.")
             log("No outputs could start — capture stopped and normal macOS audio restored", level: .error)
             rebuildOutputs()
             return
         }
+        if let solo = soloOutputUID, renderers[solo] == nil { soloOutputUID = nil }
         if syncClicksActive { startSyncClicks(only: clickTargets, muteProgram: programMuted) }
         applyAllParams()
         rebuildOutputs()
@@ -549,7 +636,7 @@ public final class SyncEngine {
         let t = (timings ?? currentTimings())[uid]
         p.delaySeconds = (t?.totalDelayMs ?? effectiveBaseLatencyMs) / 1000
         p.gain = gain(for: profile)
-        p.programMuted = programMuted ? 1 : 0
+        p.programMuted = (programMuted || (soloOutputUID != nil && soloOutputUID != uid)) ? 1 : 0
         p.fadeInSeconds = Float(fadeIn)
 
         // Channel routing.
@@ -665,7 +752,7 @@ public final class SyncEngine {
             m.locked = s.locked != 0
             newMeters[uid] = m
             // Watchdog: program audio is playing, this output is unmuted, yet it has been silent.
-            if !programMuted, !syncClicksActive, capturePeak > 0.003, let p = store.profile(uid: uid), gain(for: p) > 0.001,
+            if !programMuted, !syncClicksActive, (soloOutputUID == nil || soloOutputUID == uid), capturePeak > 0.003, let p = store.profile(uid: uid), gain(for: p) > 0.001,
                max(s.peakLeft, s.peakRight) < 1e-5 {
                 let since = silentSince[uid] ?? now
                 silentSince[uid] = since
@@ -761,5 +848,181 @@ public final class SyncEngine {
                 self.scheduleReconcile(after: 1.5)
             }
         })
+    }
+}
+
+/// Calibration-derived state only. Restoring this leaves volumes, mute, channel routing and
+/// hand-edited equalizers alone, including any changes made while calibration was running.
+public struct CalibrationSnapshot: Equatable, Sendable {
+    struct Output: Equatable, Sendable {
+        var calibration: CalibrationRecord?
+        var correction: [EQBand]
+        var correctionEnabled: Bool
+        var levelTrimDb: Double
+        var delayMode: DelayMode
+        var manualDelayMs: Double
+        var trimMs: Double
+    }
+    var outputs: [String: Output]
+    var roomCorrection: [EQBand]
+    var roomCorrectionEnabled: Bool
+}
+
+private struct EditSnapshot: Equatable {
+    var settings: AppSettings
+    var profiles: [String: DeviceProfile]
+    var setups: [SavedSetup]
+    var customPresets: [EQPreset]
+    var selectedSetupID: UUID?
+}
+
+extension SyncEngine {
+    public func captureCalibrationSnapshot() -> CalibrationSnapshot {
+        CalibrationSnapshot(outputs: store.profiles.mapValues {
+            .init(calibration: $0.calibration, correction: $0.correction,
+                  correctionEnabled: $0.correctionEnabled, levelTrimDb: $0.levelTrimDb,
+                  delayMode: $0.delayMode, manualDelayMs: $0.manualDelayMs, trimMs: $0.trimMs)
+        }, roomCorrection: store.settings.roomCorrection,
+           roomCorrectionEnabled: store.settings.roomCorrectionEnabled)
+    }
+
+    public func restoreCalibrationSnapshot(_ snapshot: CalibrationSnapshot) {
+        for (uid, value) in snapshot.outputs {
+            store.update(uid) {
+                $0.calibration = value.calibration
+                $0.correction = value.correction
+                $0.correctionEnabled = value.correctionEnabled
+                $0.levelTrimDb = value.levelTrimDb
+                $0.delayMode = value.delayMode
+                $0.manualDelayMs = value.manualDelayMs
+                $0.trimMs = value.trimMs
+            }
+        }
+        updateSettings {
+            $0.roomCorrection = snapshot.roomCorrection
+            $0.roomCorrectionEnabled = snapshot.roomCorrectionEnabled
+        }
+        log("Previous calibration restored")
+    }
+
+    /// Wrap one synchronous user action. Calls from device monitoring/calibration stay outside
+    /// this wrapper, including when they arrive between updates of a continuous slider edit.
+    public func performUndoableChange(named name: String, _ change: () -> Void) {
+        // Nested wrappers belong to the outer synchronous action, avoiding duplicate entries.
+        guard userChangeDepth == 0 else { change(); return }
+        let before = editSnapshot()
+        userChangeDepth += 1
+        change()
+        userChangeDepth -= 1
+        let after = editSnapshot()
+        guard before != after else { return }
+        registerUndo(snapshot: before, changedFrom: after, name: pendingEditName ?? name)
+    }
+
+    /// Group user actions into one undo step. Each mutation within a continuous edit must still
+    /// use performUndoableChange, so asynchronous device/timing updates never enter its history.
+    public func beginUndoableChange(named name: String) {
+        if editDepth == 0 {
+            pendingEditName = name
+        }
+        editDepth += 1
+    }
+
+    public func endUndoableChange() {
+        guard editDepth > 0 else { return }
+        editDepth -= 1
+        guard editDepth == 0 else { return }
+        pendingEditName = nil
+        if editGroupOpen {
+            editGroupOpen = false
+            undoManager.endUndoGrouping()
+        }
+        refreshUndoHistory()
+    }
+
+    public func undo() {
+        finishPendingEdit()
+        undoManager.undo()
+        refreshUndoHistory()
+    }
+
+    public func redo() {
+        finishPendingEdit()
+        undoManager.redo()
+        refreshUndoHistory()
+    }
+
+    private func finishPendingEdit() {
+        if editDepth > 0 { editDepth = 1; endUndoableChange() }
+    }
+
+    private func editSnapshot() -> EditSnapshot {
+        var settings = store.settings
+        // Lifecycle changes require AppModel and external services. They are deliberately absent
+        // from undo snapshots so undoing a volume/EQ edit never starts capture or a microphone.
+        settings.engineEnabled = false
+        settings.liveSyncEnabled = false
+        settings.launchAtLogin = false
+        settings.calibrationMicrophoneUID = nil
+        return EditSnapshot(settings: settings, profiles: store.profiles, setups: store.setups,
+                            customPresets: store.customPresets, selectedSetupID: store.selectedSetupID)
+    }
+
+    private func registerUndo(snapshot: EditSnapshot, changedFrom baseline: EditSnapshot, name: String) {
+        let grouped = editDepth == 0 && !undoManager.isUndoing && !undoManager.isRedoing
+        if grouped { undoManager.beginUndoGrouping() }
+        else if editDepth > 0, !editGroupOpen, !undoManager.isUndoing, !undoManager.isRedoing {
+            // Open lazily: an untouched slider (or background-only update) must not create an
+            // empty UndoManager group, which Cocoa otherwise exposes as an undoable action.
+            undoManager.beginUndoGrouping()
+            editGroupOpen = true
+        }
+        undoManager.registerUndo(withTarget: self) { engine in
+            let inverse = engine.editSnapshot()
+            engine.restoreEditSnapshot(snapshot, changedFrom: baseline)
+            engine.registerUndo(snapshot: inverse, changedFrom: engine.editSnapshot(), name: name)
+        }
+        undoManager.setActionName(name)
+        if grouped { undoManager.endUndoGrouping() }
+        refreshUndoHistory()
+    }
+
+    private func restoreEditSnapshot(_ snapshot: EditSnapshot, changedFrom baseline: EditSnapshot) {
+        // Restore only fields edited by this action. Device discovery, Live Sync and later
+        // calibration can continue independently without being rolled back by a volume undo.
+        for uid in Set(snapshot.profiles.keys).union(baseline.profiles.keys) {
+            let target = snapshot.profiles[uid], previous = baseline.profiles[uid]
+            guard target != previous else { continue }
+            if let target, let previous, let current = store.profile(uid: uid) {
+                store.replace(DeviceProfile.restoringChanges(target: target, baseline: previous, current: current))
+            } else if let target {
+                store.replace(target)
+            } else {
+                store.forget(uid)
+            }
+        }
+        if snapshot.setups != baseline.setups { store.setups = snapshot.setups }
+        if snapshot.customPresets != baseline.customPresets { store.customPresets = snapshot.customPresets }
+        if snapshot.selectedSetupID != baseline.selectedSetupID { store.selectedSetupID = snapshot.selectedSetupID }
+        updateSettings {
+            $0 = AppSettings.restoringChanges(target: snapshot.settings, baseline: baseline.settings, current: $0)
+        }
+        reconcile()
+    }
+
+    private func refreshUndoHistory() {
+        canUndo = undoManager.canUndo
+        canRedo = undoManager.canRedo
+        undoActionName = undoManager.undoActionName
+        redoActionName = undoManager.redoActionName
+    }
+
+    private func observeUndoHistory() {
+        for name in [Notification.Name.NSUndoManagerDidUndoChange, .NSUndoManagerDidRedoChange,
+                     .NSUndoManagerDidCloseUndoGroup] {
+            undoObservers.append(NotificationCenter.default.addObserver(forName: name, object: undoManager, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.refreshUndoHistory() }
+            })
+        }
     }
 }

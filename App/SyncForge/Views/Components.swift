@@ -146,34 +146,126 @@ struct LevelMeter: View {
 
 /// A slider with a speaker icon and percentage.
 struct VolumeSlider: View {
+    @Environment(AppModel.self) private var model
     @Binding var value: Double
     var muted: Binding<Bool>?
     var showsPercent = true
+    var accessibilityName = "Volume"
+    @State private var editingPercent = false
+    @State private var percentDraft = ""
+    @State private var percentError: String?
+    @State private var isDragging = false
+    @FocusState private var percentFocused: Bool
 
     var body: some View {
-        HStack(spacing: 8) {
-            if let muted {
-                Button {
-                    muted.wrappedValue.toggle()
-                } label: {
-                    Image(systemName: muted.wrappedValue ? "speaker.slash.fill" : volumeSymbol)
-                        .frame(width: 18)
-                        .foregroundStyle(muted.wrappedValue ? .red : .secondary)
+        VStack(alignment: .trailing, spacing: 3) {
+            HStack(spacing: 8) {
+                if let muted {
+                    Button {
+                        muted.wrappedValue.toggle()
+                    } label: {
+                        Image(systemName: muted.wrappedValue ? "speaker.slash.fill" : volumeSymbol)
+                            .frame(width: 18)
+                            .foregroundStyle(muted.wrappedValue ? .red : .secondary)
+                    }
+                    .buttonStyle(.borderless)
+                    .help(muted.wrappedValue ? "Unmute" : "Mute")
+                    .accessibilityLabel(muted.wrappedValue ? "Unmute \(accessibilityName)" : "Mute \(accessibilityName)")
+                } else {
+                    Image(systemName: volumeSymbol).frame(width: 18).foregroundStyle(.secondary)
                 }
-                .buttonStyle(.borderless)
-                .help(muted.wrappedValue ? "Unmute" : "Mute")
-            } else {
-                Image(systemName: volumeSymbol).frame(width: 18).foregroundStyle(.secondary)
+                Slider(value: $value, in: 0...1, onEditingChanged: { editing in
+                    isDragging = editing
+                    if editing { model.engine.beginUndoableChange(named: "Change \(accessibilityName)") }
+                    else { model.engine.endUndoableChange() }
+                })
+                    .controlSize(.small)
+                    .accessibilityLabel(accessibilityName)
+                    .accessibilityValue("\(percentText) percent")
+                if showsPercent {
+                    if editingPercent {
+                        TextField("0–100", text: $percentDraft)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.caption.monospacedDigit())
+                            .multilineTextAlignment(.trailing)
+                            .focused($percentFocused)
+                            .onSubmit { commitPercent() }
+                            .onExitCommand { cancelPercent() }
+                            .onChange(of: percentFocused) { _, focused in
+                                if !focused && editingPercent { commitPercent(dismissing: true) }
+                            }
+                            .accessibilityLabel("\(accessibilityName) percentage")
+                            .accessibilityHint("Enter a value from 0 to 100. Press Return to apply or Escape to cancel.")
+                            .frame(width: 60)
+                    } else {
+                        Button {
+                            percentDraft = percentText
+                            percentError = nil
+                            editingPercent = true
+                            percentFocused = true
+                        } label: {
+                            Text("\(percentLabelText)%").frame(minWidth: 36, alignment: .trailing)
+                        }
+                        .buttonStyle(.plain)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .help("Click to enter an exact volume percentage")
+                        .accessibilityLabel("Edit \(accessibilityName) percentage")
+                        .accessibilityValue("\(percentText) percent")
+                    }
+                }
             }
-            Slider(value: $value, in: 0...1)
-                .controlSize(.small)
-            if showsPercent {
-                Text("\(Int((value * 100).rounded()))%")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .frame(width: 36, alignment: .trailing)
+            if let percentError {
+                Text(percentError)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
+        .onDisappear {
+            if isDragging {
+                model.engine.endUndoableChange()
+                isDragging = false
+            }
+            cancelPercent()
+        }
+    }
+
+    private var percentText: String {
+        (value * 100).formatted(.number.precision(.fractionLength(0...6)))
+    }
+
+    private var percentLabelText: String {
+        (value * 100).formatted(.number.precision(.fractionLength(0...1)))
+    }
+
+    private func commitPercent(dismissing: Bool = false) {
+        var text = percentDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.hasSuffix("%") { text.removeLast() }
+        text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let separator = Locale.current.decimalSeparator, separator != "." {
+            text = text.replacingOccurrences(of: separator, with: ".")
+        }
+        guard let percent = Double(text), percent.isFinite, (0...100).contains(percent) else {
+            percentError = "Enter a percentage from 0 to 100."
+            if dismissing {
+                editingPercent = false
+                percentDraft = ""
+            } else { percentFocused = true }
+            return
+        }
+        model.engine.performUndoableChange(named: "Change \(accessibilityName)") { value = percent / 100 }
+        percentError = nil
+        percentDraft = ""
+        editingPercent = false
+        percentFocused = false
+    }
+
+    private func cancelPercent() {
+        editingPercent = false
+        percentFocused = false
+        percentError = nil
+        percentDraft = ""
     }
 
     private var volumeSymbol: String {
@@ -293,14 +385,20 @@ struct Banner: View {
     let text: String
     var actionTitle: String?
     var action: (() -> Void)?
+    var stacksAction = false
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Image(systemName: kind == .info ? "info.circle.fill" : "exclamationmark.triangle.fill")
                 .foregroundStyle(kind == .error ? .red : kind == .warning ? .orange : .blue)
-            Text(text).fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(text).fixedSize(horizontal: false, vertical: true)
+                if stacksAction, let actionTitle, let action {
+                    Button(actionTitle, action: action).controlSize(.small)
+                }
+            }
             Spacer(minLength: 0)
-            if let actionTitle, let action {
+            if !stacksAction, let actionTitle, let action {
                 Button(actionTitle, action: action).controlSize(.small)
             }
         }

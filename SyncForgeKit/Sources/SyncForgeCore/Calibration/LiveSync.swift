@@ -209,6 +209,11 @@ public final class LiveSync {
             state = .waiting("Paused while test signals play")
             return
         }
+        guard engine.soloOutputUID == nil else {
+            state = .waiting("Paused while an output is soloed")
+            unconfirmed = nil
+            return
+        }
         let active = engine.activeOutputUIDs.compactMap { uid in engine.renderer(for: uid).map { (uid, $0.device) } }
         let wired = active.filter { !$0.1.transport.isWireless }
         let wireless = active.filter { $0.1.transport.isWireless }
@@ -233,6 +238,7 @@ public final class LiveSync {
         let activeUIDs = Set(active.map(\.0))
         let profiles = Dictionary(uniqueKeysWithValues: activeUIDs.map { ($0, engine.store.profile(uid: $0)) })
         let settings = engine.store.settings
+        let routingRevision = engine.programRoutingRevision
         let context = LiveSyncPlaybackContext(profiles: profiles, settings: settings)
         if evidenceContext != context { confirmation.reset() }
         evidenceContext = context
@@ -251,7 +257,7 @@ public final class LiveSync {
             return
         }
         recorder.setArmed(false)
-        guard !Task.isCancelled, engine.isEnabled, !engine.programMuted, !engine.syncClicksActive else { return }
+        guard !Task.isCancelled, engine.isEnabled, !engine.programMuted, !engine.syncClicksActive, engine.soloOutputUID == nil, engine.programRoutingRevision == routingRevision else { return }
         let tl = recorder.timeline()
         let n = min(recorder.frameCount, Int(measurementWindow * recorder.sampleRate))
         guard n >= Int(3 * recorder.sampleRate), let h0 = tl.hostTime(ofFrame: 0),
@@ -272,7 +278,8 @@ public final class LiveSync {
         guard !Task.isCancelled, self.recorder === recorder else { return }
         // Analysis deliberately leaves the main actor. Reject results if their playback/calibration
         // context changed during recording or computation, instead of applying stale measurements.
-        guard engine.isEnabled, !engine.programMuted, !engine.syncClicksActive,
+        guard engine.isEnabled, !engine.programMuted, !engine.syncClicksActive, engine.soloOutputUID == nil,
+              engine.programRoutingRevision == routingRevision,
               Set(engine.activeOutputUIDs) == activeUIDs, engine.store.settings == settings,
               profiles.allSatisfy({ engine.store.profile(uid: $0.key) == $0.value }) else {
             unconfirmed = nil

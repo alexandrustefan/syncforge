@@ -111,6 +111,24 @@ limits. Electrical response tests do not establish a subjective or acoustic impr
 - The GitHub workflow also runs the C handoff regression tests under Thread Sanitizer. CI results
   are available from the repository's Actions tab; local validation alone does not establish CI success.
 
+### Setup recall and control improvements (2026-10-18)
+
+- `SYNCFORGE_SIGN_IDENTITY=- scripts/build.sh --test`: succeeded. The release suite executed
+  73 tests, with one opt-in benchmark skipped and zero failures. The ad-hoc signed Release app
+  built and passed signature verification; it was not installed.
+- Twelve new tests cover legacy setup decoding, playback-setting recall, selected-setup
+  persistence, temporary solo, grouped undo/redo, calibration restoration and reset, and stopping
+  sync-test clicks before calibration. Audio backends are mocks; no real devices are opened.
+- Undo regressions include background timing updates and device discovery both after an edit and
+  between updates during a slider drag. Those changes survive undo/redo.
+- Native UI checks used an isolated preview with in-memory settings and the audio engine off.
+  Exact volume entry, invalid-value rejection, Escape cancellation, setup recall and undo,
+  text-field undo/redo, and one-step undo of a complete volume drag were exercised. Output cards
+  and the EQ toolbar were inspected at the default window size.
+- This pass does not qualify audible solo transitions, microphone calibration timing, Live Sync
+  accuracy, reconnect behavior or acoustic alignment. No audio capture or calibration was started
+  during the UI checks.
+
 ## Issues found on hardware and fixed
 
 1. PHAT weighting gave noise-only bins (above the mic's ~5–6 kHz cut-off) full weight. Result: 17 dB

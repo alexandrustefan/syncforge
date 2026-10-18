@@ -4,6 +4,7 @@ import SyncForgeCore
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
     @State private var setupName = ""
+    @State private var settingsGestureActive = false
 
     private var engine: SyncEngine { model.engine }
 
@@ -25,7 +26,8 @@ struct SettingsView: View {
             Section("Synchronization") {
                 LabeledContent("Base latency") {
                     HStack {
-                        Slider(value: engine.settingsBinding(\.baseLatencyMs), in: 20...200, step: 5).frame(width: 200)
+                        Slider(value: engine.settingsBinding(\.baseLatencyMs), in: 20...200, step: 5,
+                               onEditingChanged: { editSettings($0, named: "Change Base Latency") }).frame(width: 200)
                         Text(String(format: "%.0f ms", engine.store.settings.baseLatencyMs)).monospacedDigit().frame(width: 56)
                     }
                 }
@@ -47,7 +49,8 @@ struct SettingsView: View {
                 }
                 LabeledContent("Reconnect fade-in") {
                     HStack {
-                        Slider(value: engine.settingsBinding(\.reconnectFadeInSeconds), in: 0.2...5).frame(width: 200)
+                        Slider(value: engine.settingsBinding(\.reconnectFadeInSeconds), in: 0.2...5,
+                               onEditingChanged: { editSettings($0, named: "Change Reconnect Fade") }).frame(width: 200)
                         Text(String(format: "%.1f s", engine.store.settings.reconnectFadeInSeconds)).monospacedDigit()
                     }
                 }
@@ -63,26 +66,51 @@ struct SettingsView: View {
             }
 
             Section("Setups") {
+                if let current = engine.selectedSetup {
+                    HStack {
+                        Text("Current: \(current.name)\(engine.isSelectedSetupModified ? " · Modified" : "")")
+                        Spacer()
+                        Button("Update Current Setup") {
+                            engine.performUndoableChange(named: "Update Setup") { _ = engine.updateSetup(current.id) }
+                        }
+                        .disabled(!engine.isSelectedSetupModified)
+                    }
+                }
                 HStack {
                     TextField("Name for the current setup", text: $setupName)
                     Button("Save Current Setup") {
-                        engine.saveSetup(named: setupName.isEmpty ? "Setup \(engine.store.setups.count + 1)" : setupName)
+                        let name = setupName.trimmingCharacters(in: .whitespacesAndNewlines)
+                        engine.performUndoableChange(named: "Save Setup") {
+                            _ = engine.saveSetup(named: name.isEmpty ? "Setup \(engine.store.setups.count + 1)" : name)
+                        }
                         setupName = ""
                     }
                 }
+                Text("Saves selected outputs, volume and mute, delays, per-output EQ, System EQ, and room correction. Switching setups keeps SyncForge's current on/off state.")
+                    .font(.caption).foregroundStyle(.secondary)
                 ForEach(engine.store.setups) { setup in
                     HStack {
                         VStack(alignment: .leading) {
-                            Text(setup.name)
+                            HStack(spacing: 5) {
+                                Text(setup.name)
+                                if engine.selectedSetupID == setup.id {
+                                    Image(systemName: "checkmark").foregroundStyle(.secondary)
+                                        .accessibilityLabel("Current setup")
+                                }
+                            }
                             Text("\(setup.profiles.filter(\.enabled).map(\.name).joined(separator: ", "))")
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()
-                        Button("Restore") { engine.applySetup(setup) }
+                        Button("Restore") {
+                            engine.performUndoableChange(named: "Restore Setup") { engine.applySetup(setup) }
+                        }
                         Button(role: .destructive) {
-                            engine.store.setups.removeAll { $0.id == setup.id }
+                            engine.performUndoableChange(named: "Delete Setup") { engine.removeSetup(setup.id) }
                         } label: { Image(systemName: "trash") }
                         .buttonStyle(.borderless)
+                        .help("Delete \(setup.name)")
+                        .accessibilityLabel("Delete setup \(setup.name)")
                     }
                 }
             }
@@ -117,7 +145,20 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .disabled(model.calibration.isRunning)
         .onAppear { engine.refreshPermissions() }
+        .onDisappear {
+            if settingsGestureActive {
+                engine.endUndoableChange()
+                settingsGestureActive = false
+            }
+        }
+    }
+
+    private func editSettings(_ editing: Bool, named name: String) {
+        settingsGestureActive = editing
+        if editing { engine.beginUndoableChange(named: name) }
+        else { engine.endUndoableChange() }
     }
 
     private func permissionText(_ s: SystemAudioPermission.Status) -> String {

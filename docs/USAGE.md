@@ -13,7 +13,12 @@
    3. **Live Sync** can turn on automatically after a successful calibration. It monitors candidate
       wireless latency changes while music plays; reflections and weak signals can remain ambiguous.
 
-   *Start Over…* forgets every measurement, delay, correction and level trim.
+   Progress shows the speaker being measured and an approximate remaining time once enough sweeps
+   have completed. Retries and verification can change that estimate.
+
+   *Restore Previous Calibration* returns to the timing, correction and level trims from before the
+   latest calibration change in this app session. It also remains available if verification failed
+   after applying measurements. *Start Over…* clears measurements and derived adjustments; it can be undone.
 3. **Fine-tune by ear (optional).** *Sync Test* plays one click on every output. Nudge *Fine trim*
    (±1 / ±0.1 ms) until you hear a single sharp click.
 4. **Equalize.** *Equalizer → All Outputs (System EQ)* shapes the overall sound; pick a speaker to adjust it
@@ -21,6 +26,19 @@
    measured (grey).
 
 **Tips**
+- **Setups:** save a configuration in Settings, then switch from the menu bar. New setups include
+  system EQ, room correction, master volume/mute and buffering settings as well as speaker profiles.
+  *Modified* means the current sound differs from the selected setup; *Update Current Setup* saves
+  those changes. Older setups keep their original scope until updated. Engine power, microphone
+  selection, Live Sync and login preferences are not changed by setup recall.
+- **Solo:** listen to one enabled speaker during normal playback from Outputs or the menu bar.
+  Click Solo again to restore the mix. Saved mute and volume settings remain intact; Live Sync waits
+  while Solo is active.
+- **Exact volume:** click a percentage, type a value from 0 to 100, and press Return. Escape cancels.
+- **Compact outputs:** expand *Channels, timing & diagnostics* to adjust channels, delays and inspect
+  diagnostics. Enabled outputs appear above unused devices.
+- **Undo:** ⌘Z reverses audio edits, resets and setup changes; ⌘⇧Z reapplies them. A slider drag is one
+  undo step. Undo history lasts for the current app session; text fields retain ordinary text undo.
 - **Quieter speakers** (e.g. MacBook speakers): use *Match speaker levels*, or raise that speaker's *Preamp*
   with *Prevent clipping* on.
 - **Volume keys** control every output together (*Settings → macOS volume controls all outputs*).
@@ -31,6 +49,8 @@
 | Symptom | Fix |
 |---|---|
 | Outputs silent, source meter flat | Allow *System Audio Recording*: System Settings › Privacy & Security › Screen & System Audio Recording › SyncForge. |
+| Audio capture or an output failed | Use *Retry Audio* in the menu bar. Permission warnings offer *Open Permission Settings* instead. |
+| Live Sync message is shortened | Expand its status in the menu bar to read the full reason. |
 | Live Sync says "Calibrated with … — recalibrate" | Calibrate with the microphone that's selected now (one mic drives both). |
 | Live Sync "Waiting for music" | It needs music playing; it pauses during test signals. |
 | Speakers drift apart over time | Turn on Live Sync, or *Calibrate All* again. |

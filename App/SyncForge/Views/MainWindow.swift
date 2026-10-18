@@ -31,6 +31,7 @@ struct MainWindow: View {
                 }
                 .toggleStyle(.switch)
                 .help("Start or stop SyncForge")
+                .disabled(model.calibration.isRunning)
             }
         }
         .onAppear {
@@ -97,7 +98,8 @@ struct OutputsView: View {
                         Divider().frame(height: 50)
                         VStack(alignment: .leading, spacing: 6) {
                             Text("Master Volume").font(.caption).foregroundStyle(.secondary)
-                            VolumeSlider(value: engine.settingsBinding(\.masterVolume), muted: engine.settingsBinding(\.masterMuted))
+                            VolumeSlider(value: engine.settingsBinding(\.masterVolume), muted: engine.settingsBinding(\.masterMuted), accessibilityName: "Master volume")
+                                .disabled(model.calibration.isRunning)
                         }
                         Divider().frame(height: 50)
                         VStack(alignment: .trailing, spacing: 6) {
@@ -114,11 +116,19 @@ struct OutputsView: View {
                         }
                     }
                 }
-                ForEach(engine.outputs) { output in
+                ForEach(sortedOutputs) { output in
                     OutputCard(output: output)
                 }
             }
             .padding(20)
+        }
+    }
+
+    private var sortedOutputs: [OutputState] {
+        model.engine.outputs.sorted {
+            let lhs = ($0.profile.enabled ? 0 : 1, $0.name.localizedLowercase, $0.uid)
+            let rhs = ($1.profile.enabled ? 0 : 1, $1.name.localizedLowercase, $1.uid)
+            return lhs < rhs
         }
     }
 
@@ -155,6 +165,7 @@ struct OutputCard: View {
                     .toggleStyle(.switch)
                     .labelsHidden()
                     .controlSize(.small)
+                    .accessibilityLabel("Enable \(output.name)")
                 Image(systemName: output.transport.symbol).font(.title3).foregroundStyle(.secondary).frame(width: 24)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(output.name).font(.headline)
@@ -165,57 +176,47 @@ struct OutputCard: View {
             }
 
             if output.profile.enabled {
-                Divider()
-                Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 14, verticalSpacing: 10) {
-                    GridRow {
-                        Text("Volume").foregroundStyle(.secondary)
-                        VolumeSlider(value: engine.profileBinding(uid, \.volume, fallback: 1),
-                                     muted: engine.profileBinding(uid, \.muted, fallback: false))
-                            .frame(maxWidth: 360)
-                    }
-                    if abs(output.profile.levelTrimDb) > 0.05 {
-                        GridRow {
-                            Text("Level trim").foregroundStyle(.secondary)
-                            HStack {
-                                Text(String(format: "%+.1f dB (from calibration level matching)", output.profile.levelTrimDb))
-                                Button("Reset") { engine.updateProfile(uid) { $0.levelTrimDb = 0 } }.controlSize(.small)
-                            }
-                        }
-                    }
-                    GridRow {
-                        Text("Channels").foregroundStyle(.secondary)
-                        HStack {
-                            Picker("", selection: engine.profileBinding(uid, \.channelMode, fallback: .stereo)) {
-                                ForEach(ChannelMode.allCases) { Text($0.displayName).tag($0) }
-                            }
-                            .labelsHidden()
-                            .frame(width: 160)
-                            .disabled((output.device?.outputChannels ?? 2) < 2)
-                            if let d = output.device, d.outputChannels > 2 { channelPairPicker(d) }
-                        }
-                    }
-                    GridRow {
-                        Text("Delay").foregroundStyle(.secondary)
-                        DelayControls(output: output)
-                    }
-                    GridRow {
-                        Text("Sync").foregroundStyle(.secondary)
-                        syncInfo
-                    }
-                    GridRow {
-                        Text("Equalizer").foregroundStyle(.secondary)
-                        HStack {
-                            Text(output.profile.dsp.enabled ? output.profile.dsp.presetName : "Bypassed")
-                            if output.profile.useSystemEQ && engine.store.settings.systemDSP.enabled && !engine.store.settings.systemDSP.isNeutral {
-                                Text("+ System “\(engine.store.settings.systemDSP.presetName)”").foregroundStyle(.secondary)
-                            }
-                            Button("Edit EQ…") { model.openEqualizer(for: uid) }.controlSize(.small)
-                        }
-                    }
+                HStack(spacing: 14) {
+                    VolumeSlider(value: engine.profileBinding(uid, \.volume, fallback: 1),
+                                 muted: engine.profileBinding(uid, \.muted, fallback: false), accessibilityName: "\(output.name) volume")
+                        .frame(maxWidth: 340)
+                    Spacer(minLength: 0)
+                    Button(engine.soloOutputUID == uid ? "Unsolo" : "Solo") { engine.toggleSolo(uid) }
+                        .controlSize(.small)
+                        .tint(engine.soloOutputUID == uid ? .accentColor : nil)
+                        .disabled(output.status != .playing || model.calibration.isRunning)
+                        .help("Listen to this output alone without changing other outputs' volume or mute settings")
+                    Button("Edit EQ…") { model.openEqualizer(for: uid) }.controlSize(.small)
                 }
-                meters
+                HStack(spacing: 10) {
+                    OutputLevelMeter(uid: uid).frame(width: 140)
+                    Text(engine.soloOutputUID.map { $0 == uid ? "Solo playback" : "Silenced by solo" }
+                         ?? equalizerSummary)
+                        .font(.caption).foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .help(equalizerSummary)
+                    Spacer()
+                    Text(output.syncSummary)
+                        .font(.caption)
+                        .foregroundStyle(output.profile.calibration?.needsRecalibration == true ? .orange : .secondary)
+                }
+                DisclosureGroup("Channels, timing & diagnostics") {
+                    OutputDetails(output: output)
+                        .padding(.top, 8)
+                }
+                .font(.callout)
             }
         }
+        .disabled(model.calibration.isRunning)
+    }
+
+    private var equalizerSummary: String {
+        var summary = output.profile.dsp.enabled ? output.profile.dsp.presetName : "EQ bypassed"
+        let systemDSP = model.engine.store.settings.systemDSP
+        if output.profile.useSystemEQ && systemDSP.enabled && !systemDSP.isNeutral {
+            summary += " + System “\(systemDSP.presetName)”"
+        }
+        return summary
     }
 
     private var deviceLine: String {
@@ -230,13 +231,65 @@ struct OutputCard: View {
         if output.isDefaultOutput { parts.append("macOS default output") }
         return parts.joined(separator: " · ")
     }
+}
+
+private struct OutputDetails: View {
+    @Environment(AppModel.self) private var model
+    let output: OutputState
+
+    var body: some View {
+        let engine = model.engine
+        let uid = output.uid
+        VStack(alignment: .leading, spacing: 12) {
+            Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 14, verticalSpacing: 10) {
+                GridRow {
+                    Text("Channels").foregroundStyle(.secondary)
+                    HStack {
+                        Picker("Channel mode", selection: engine.profileBinding(uid, \.channelMode, fallback: .stereo)) {
+                            ForEach(ChannelMode.allCases) { Text($0.displayName).tag($0) }
+                        }
+                        .labelsHidden()
+                        .frame(width: 160)
+                        .disabled((output.device?.outputChannels ?? 2) < 2)
+                        if let d = output.device, d.outputChannels > 2 { channelPairPicker(d) }
+                    }
+                }
+                GridRow {
+                    Text("Delay").foregroundStyle(.secondary)
+                    DelayControls(output: output)
+                }
+                GridRow {
+                    Text("Sync").foregroundStyle(.secondary)
+                    syncInfo
+                }
+                if abs(output.profile.levelTrimDb) > 0.05 {
+                    GridRow {
+                        Text("Level trim").foregroundStyle(.secondary)
+                        HStack {
+                            Text(String(format: "%+.1f dB from calibration", output.profile.levelTrimDb))
+                            Button("Reset") {
+                                engine.performUndoableChange(named: "Reset Level Trim") {
+                                    engine.updateProfile(uid) { $0.levelTrimDb = 0 }
+                                }
+                            }.controlSize(.small)
+                        }
+                    }
+                }
+            }
+            OutputMeterRow(uid: uid)
+        }
+    }
 
     private func channelPairPicker(_ d: AudioDeviceInfo) -> some View {
         let engine = model.engine
         let pairs = stride(from: 1, to: d.outputChannels, by: 2).map { ($0, $0 + 1) }
         return Picker("Pair", selection: Binding(
             get: { output.profile.leftChannel ?? d.preferredStereo.0 },
-            set: { l in engine.updateProfile(output.uid) { $0.leftChannel = l; $0.rightChannel = l + 1 } })) {
+            set: { l in
+                engine.performUndoableChange(named: "Change Output Channels") {
+                    engine.updateProfile(output.uid) { $0.leftChannel = l; $0.rightChannel = l + 1 }
+                }
+            })) {
             ForEach(pairs, id: \.0) { p in Text("Ch \(p.0)–\(p.1)").tag(p.0) }
         }
         .frame(width: 140)
@@ -267,10 +320,6 @@ struct OutputCard: View {
             }
         }
     }
-
-    private var meters: some View {
-        OutputMeterRow(uid: output.uid)
-    }
 }
 
 private struct OutputMeterRow: View {
@@ -299,6 +348,7 @@ private struct OutputMeterRow: View {
 /// Automatic / manual delay with coarse and fine controls.
 struct DelayControls: View {
     @Environment(AppModel.self) private var model
+    @State private var isEditingDelay = false
     let output: OutputState
 
     var body: some View {
@@ -320,7 +370,9 @@ struct DelayControls: View {
                     Text("(limited to \(Int(maxDelay)) ms)").font(.caption).foregroundStyle(.orange)
                 }
                 Spacer()
-                Button("Reset") { engine.resetDelay(uid) }
+                Button("Reset") {
+                    engine.performUndoableChange(named: "Reset Delay") { engine.resetDelay(uid) }
+                }
                     .controlSize(.small)
                     .help("Back to the measured compensation without fine trim")
             }
@@ -332,11 +384,19 @@ struct DelayControls: View {
                 }
             } else {
                 HStack {
-                    Slider(value: engine.profileBinding(uid, \.manualDelayMs, fallback: 0), in: 0...maxDelay)
+                    Slider(value: engine.profileBinding(uid, \.manualDelayMs, fallback: 0), in: 0...maxDelay, onEditingChanged: delayEditingChanged)
                         .frame(maxWidth: 260)
                     DelayAdjuster(value: engine.profileBinding(uid, \.manualDelayMs, fallback: 0), range: 0...maxDelay)
                 }
             }
         }
+        .onDisappear { delayEditingChanged(false) }
+    }
+
+    private func delayEditingChanged(_ editing: Bool) {
+        guard editing != isEditingDelay else { return }
+        isEditingDelay = editing
+        if editing { model.engine.beginUndoableChange(named: "Adjust Delay") }
+        else { model.engine.endUndoableChange() }
     }
 }

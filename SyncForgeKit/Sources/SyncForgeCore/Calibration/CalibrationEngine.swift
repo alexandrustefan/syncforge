@@ -98,6 +98,10 @@ public final class CalibrationEngine {
 
     public private(set) var phase: Phase = .idle
     public private(set) var progress: Double = 0
+    /// Actual target count, including any expansion required by microphone changes.
+    public private(set) var speakerCount = 0
+    /// 1-based only while acquiring one speaker at a time; nil for interleaved measurements.
+    public private(set) var currentSpeakerIndex: Int?
     public private(set) var micLevelDb: Float = -120
     public private(set) var micInUse = false
     public private(set) var measurements: [DeviceMeasurement] = []
@@ -134,11 +138,30 @@ public final class CalibrationEngine {
 
     public func cancel() { task?.cancel() }
 
+    /// Clears the completed or failed session when the user starts over. A live measurement
+    /// owns its state until it finishes or cancellation completes.
+    public func clearResults() {
+        guard !isRunning else { return }
+        phase = .idle
+        progress = 0
+        measurements = []
+        verification = nil
+        lastReport = nil
+        log = []
+        speakerCount = 0
+        currentSpeakerIndex = nil
+        micLevelDb = -120
+    }
+
     /// Runs a full calibration and returns the report.
     @discardableResult
     public func run(outputs: [String]? = nil, microphoneUID: String? = nil) async throws -> CalibrationReport {
         measurements = []
+        speakerCount = 0
+        currentSpeakerIndex = nil
+        defer { currentSpeakerIndex = nil }
         verification = nil
+        lastReport = nil
         log = []
         progress = 0
         phase = .preparing
@@ -171,6 +194,9 @@ public final class CalibrationEngine {
         var targets = (outputs ?? engine.activeOutputUIDs).filter { engine.renderer(for: $0) != nil }
             .sorted { (engine.renderer(for: $0)?.device.name ?? $0) < (engine.renderer(for: $1)?.device.name ?? $1) }
         guard !targets.isEmpty else { throw CalibrationError.noOutputs }
+        // Calibration owns test playback. Clicks on other outputs would contaminate sweeps,
+        // including when calibration is opened from the menu without leaving the sync-test UI.
+        if engine.syncClicksActive { engine.stopSyncClicks() }
 
         let micUID = microphoneUID ?? engine.store.settings.calibrationMicrophoneUID
         guard let mic = micUID.flatMap({ engine.devices.inputDevice(uid: $0) }) ?? engine.devices.recommendedMicrophone else {
@@ -186,6 +212,7 @@ public final class CalibrationEngine {
                 note("Other outputs were calibrated with a different microphone — measuring all outputs")
             }
         }
+        speakerCount = targets.count
         guard await MicrophonePermission.request() else { throw CalibrationError.permissionDenied }
 
         // Delays in effect before calibration, to estimate the "before" error later.
@@ -222,7 +249,8 @@ public final class CalibrationEngine {
         // 1. Coarse: find each output with a wide search window (one at a time).
         var results: [DeviceMeasurement] = []
         var coarse: [String: (latency: Double, gainDb: Double, pnr: Double)] = [:]
-        for uid in targets {
+        for (index, uid) in targets.enumerated() {
+            currentSpeakerIndex = index + 1
             try Task.checkCancellation()
             guard let r = engine.renderer(for: uid) else { throw CalibrationError.outputVanished(uid) }
             phase = .measuring(r.device.name)
@@ -241,6 +269,8 @@ public final class CalibrationEngine {
             results.append(m)
             measurements = results
         }
+
+        currentSpeakerIndex = nil
 
         // 2. Interleaved repetitions, drift-cancelled against a reference output.
         let found = targets.filter { coarse[$0] != nil }

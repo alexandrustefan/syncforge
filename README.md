@@ -135,7 +135,7 @@ cd SyncForgeKit
 swift test -c release
 ```
 
-The suite currently contains 60 ordinary tests and one opt-in offline benchmark. Hardware claims,
+The suite currently contains 72 ordinary tests and one opt-in offline benchmark. Hardware claims,
 test conditions and known gaps are recorded in [VALIDATION.md](docs/VALIDATION.md).
 
 ## Documentation and contributions
